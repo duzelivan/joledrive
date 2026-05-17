@@ -49,21 +49,24 @@ router.get('/:id', authenticate, async (req, res) => {
 router.post('/', authenticate, authorize(['vehicles.create']), async (req, res) => {
   try {
     const {
-      manufacturer, model, chassis_number, year, mileage,
+      manufacturer, model, license_plate, chassis_number, year, mileage,
       fuel_type, color, registration_date, yellow_card_date,
       pp_apparatus_date, image_url, notes
     } = req.body;
 
     const [result] = await pool.execute(
-      `INSERT INTO vehicles (manufacturer, model, chassis_number, year, mileage, fuel_type, color, 
+      `INSERT INTO vehicles (manufacturer, model, license_plate, chassis_number, year, mileage, fuel_type, color, 
         registration_date, yellow_card_date, pp_apparatus_date, image_url, notes) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [manufacturer, model, chassis_number, year, mileage, fuel_type, color,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [manufacturer, model, license_plate, chassis_number, year, mileage, fuel_type, color,
        registration_date, yellow_card_date, pp_apparatus_date, image_url, notes]
     );
 
     res.status(201).json({ id: result.insertId, message: 'Vehicle created successfully' });
   } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({ error: 'License plate or chassis number already exists' });
+    }
     res.status(500).json({ error: 'Failed to create vehicle' });
   }
 });
@@ -72,18 +75,18 @@ router.post('/', authenticate, authorize(['vehicles.create']), async (req, res) 
 router.put('/:id', authenticate, authorize(['vehicles.edit']), async (req, res) => {
   try {
     const {
-      manufacturer, model, chassis_number, year, mileage,
+      manufacturer, model, license_plate, chassis_number, year, mileage,
       fuel_type, color, registration_date, yellow_card_date,
       pp_apparatus_date, image_url, notes
     } = req.body;
 
     await pool.execute(
       `UPDATE vehicles SET 
-        manufacturer = ?, model = ?, chassis_number = ?, year = ?, mileage = ?,
+        manufacturer = ?, model = ?, license_plate = ?, chassis_number = ?, year = ?, mileage = ?,
         fuel_type = ?, color = ?, registration_date = ?, yellow_card_date = ?,
         pp_apparatus_date = ?, image_url = ?, notes = ?
        WHERE id = ?`,
-      [manufacturer, model, chassis_number, year, mileage, fuel_type, color,
+      [manufacturer, model, license_plate, chassis_number, year, mileage, fuel_type, color,
        registration_date, yellow_card_date, pp_apparatus_date, image_url, notes, req.params.id]
     );
 
