@@ -68,7 +68,7 @@ router.put('/:id', authenticate, async (req, res) => {
       return res.status(403).json({ error: 'Can only edit your own profile' });
     }
 
-    const { name, email, phone, role, permissions, active } = req.body;
+    const { name, email, phone, role, permissions, active, password } = req.body;
     const updates = [];
     const values = [];
 
@@ -78,6 +78,13 @@ router.put('/:id', authenticate, async (req, res) => {
     if (role && req.user.role === 'admin') { updates.push('role = ?'); values.push(role); }
     if (permissions && req.user.role === 'admin') { updates.push('permissions = ?'); values.push(JSON.stringify(permissions)); }
     if (active !== undefined && req.user.role === 'admin') { updates.push('active = ?'); values.push(active); }
+    
+    // === DODAJ OVO ===
+    if (password && password.length > 0) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      updates.push('password = ?');
+      values.push(hashedPassword);
+    }
 
     values.push(req.params.id);
     await pool.execute(
