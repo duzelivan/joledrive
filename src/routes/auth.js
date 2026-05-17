@@ -1,7 +1,16 @@
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const speakeasy = require('speakeasy');
+const pool = require('../config/database');
+const { authenticate } = require('../middleware/auth');
+const router = express.Router();
+
+// Login
 router.post('/login', async (req, res) => {
   try {
     const { email, password, totpCode } = req.body;
-    
+
     const [users] = await pool.execute(
       'SELECT * FROM users WHERE email = ? AND active = 1',
       [email]
@@ -13,7 +22,7 @@ router.post('/login', async (req, res) => {
 
     const user = users[0];
     const validPassword = await bcrypt.compare(password, user.password);
-    
+
     if (!validPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -43,18 +52,6 @@ router.post('/login', async (req, res) => {
       { expiresIn: '8h' }
     );
 
-    // FIX: Parsiraj permissions sigurno
-    let userPermissions = {};
-    if (user.permissions) {
-      try {
-        userPermissions = typeof user.permissions === 'string' 
-          ? JSON.parse(user.permissions) 
-          : user.permissions;
-      } catch (e) {
-        userPermissions = {};
-      }
-    }
-
     res.json({
       token,
       user: {
@@ -62,7 +59,7 @@ router.post('/login', async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        permissions: userPermissions
+        permissions: JSON.parse(user.permissions || '{}')
       }
     });
   } catch (error) {
@@ -70,3 +67,42 @@ router.post('/login', async (req, res) => {
     res.status(500).json({ error: 'Login failed' });
   }
 });
+
+// Setup 2FA
+router.post('/setup-2fa', authenticate, async (req, res) => {
+  try {
+    const secret = speakeasy.generateSecret({
+      name: `JoleDrive:${req.user.email}`
+    });
+
+    await pool.execute(
+      'UPDATE users SET totp_secret = ? WHERE id = ?',
+      [secret.base32, req.user.id]
+    );
+
+    const QRCode = require('qrcode');
+    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+
+    res.json({
+      secret: secret.base32,
+      qrCode: qrCodeUrl
+    });
+  } catch (error) {
+    res.status(500).json({ error: '2FA setup failed' });
+  }
+});
+
+// Verify session
+router.get('/me', authenticate, async (req, res) => {
+  res.json({
+    user: {
+      id: req.user.id,
+      name: req.user.name,
+      email: req.user.email,
+      role: req.user.role,
+      permissions: JSON.parse(req.user.permissions || '{}')
+    }
+  });
+});
+
+module.exports = router;
