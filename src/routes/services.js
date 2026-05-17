@@ -107,32 +107,79 @@ router.put('/:id/confirm', authenticate, async (req, res) => {
 // Complete service
 router.put('/:id/complete', authenticate, async (req, res) => {
   try {
-    const { work_description, labor_cost, parts_used } = req.body;
+    const { work_description, labor_cost, mileage, parts_used } = req.body;
 
-    await pool.execute(
-      'UPDATE services SET status = ?, work_description = ?, labor_cost = ?, completed_at = NOW() WHERE id = ?',
-      ['completed', work_description, labor_cost, req.params.id]
+    // Dohvati vehicle_id za ažuriranje kilometraže
+    const [serviceData] = await pool.execute(
+      'SELECT vehicle_id FROM services WHERE id = ?',
+      [req.params.id]
     );
 
-    // Add parts used and deduct from warehouse
-    if (parts_used && parts_used.length > 0) {
-      for (const part of parts_used) {
-        await pool.execute(
-          'INSERT INTO service_parts (service_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)',
-          [req.params.id, part.part_id, part.quantity, part.unit_price]
-        );
-
-        // Deduct from warehouse
-        await pool.execute(
-          'UPDATE warehouse SET quantity = quantity - ? WHERE id = ?',
-          [part.quantity, part.part_id]
-        );
-      }
+    if (serviceData.length === 0) {
+      return res.status(404).json({ error: 'Service not found' });
     }
 
-    res.json({ message: 'Service completed successfully' });
+    const vehicleId = serviceData[0].vehicle_id;
+
+    // Započni transakciju
+    const connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    try {
+      // 1. Ažuriraj servis
+      await connection.execute(
+        'UPDATE services SET status = ?, work_description = ?, labor_cost = ?, completed_at = NOW() WHERE id = ?',
+        ['completed', work_description, labor_cost, req.params.id]
+      );
+
+      // 2. Ažuriraj kilometražu vozila ako je poslana
+      if (mileage && mileage > 0) {
+        await connection.execute(
+          'UPDATE vehicles SET mileage = ? WHERE id = ?',
+          [mileage, vehicleId]
+        );
+      }
+
+      // 3. Dodaj dijelove i razduži skladište
+      if (parts_used && parts_used.length > 0) {
+        for (const part of parts_used) {
+          // Provjeri dostupnost
+          const [stock] = await connection.execute(
+            'SELECT quantity FROM warehouse WHERE id = ?',
+            [part.part_id]
+          );
+
+          if (stock.length === 0 || stock[0].quantity < part.quantity) {
+            throw new Error(`Nedovoljna zaliha za dio: ${part.name}`);
+          }
+
+          // Dodaj u service_parts
+          await connection.execute(
+            'INSERT INTO service_parts (service_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)',
+            [req.params.id, part.part_id, part.quantity, part.unit_price]
+          );
+
+          // Razduži skladište
+          await connection.execute(
+            'UPDATE warehouse SET quantity = quantity - ? WHERE id = ?',
+            [part.quantity, part.part_id]
+          );
+        }
+      }
+
+      await connection.commit();
+      res.json({ message: 'Service completed successfully' });
+
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
+
   } catch (error) {
-    res.status(500).json({ error: 'Failed to complete service' });
+    console.error('Complete service error:', error);
+    res.status(500).json({ error: error.message || 'Failed to complete service' });
   }
 });
 
