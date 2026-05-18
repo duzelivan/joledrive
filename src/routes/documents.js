@@ -25,7 +25,11 @@ const upload = multer({
 router.get('/', authenticate, async (req, res) => {
   try {
     const { search, type, vehicle_id, sort_by } = req.query;
-    let query = 'SELECT d.*, v.manufacturer, v.model FROM documents d LEFT JOIN vehicles v ON d.vehicle_id = v.id WHERE 1=1';
+    let query = `SELECT d.*, v.manufacturer, v.model, v.license_plate, u.name as user_name 
+                 FROM documents d 
+                 LEFT JOIN vehicles v ON d.vehicle_id = v.id 
+                 LEFT JOIN users u ON d.user_id = u.id 
+                 WHERE 1=1`;
     const params = [];
 
     if (search) {
