@@ -50,13 +50,10 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// Upload document
-router.post('/', authenticate, authorize(['documents.create']), upload.single('file'), async (req, res) => {
+// Create document (bez uploada, samo zapis u bazu)
+router.post('/', authenticate, authorize(['documents.create']), async (req, res) => {
   try {
-    const { title, description, document_type, vehicle_id, user_id } = req.body;
-    const file_path = req.file ? `/uploads/documents/${req.file.filename}` : null;
-    const file_size = req.file ? req.file.size : 0;
-    const file_type = req.file ? req.file.mimetype : null;
+    const { title, description, document_type, file_path, file_size, file_type, vehicle_id, user_id } = req.body;
 
     const [result] = await pool.execute(
       `INSERT INTO documents (title, description, document_type, file_path, file_size, file_type, vehicle_id, user_id) 
@@ -64,11 +61,12 @@ router.post('/', authenticate, authorize(['documents.create']), upload.single('f
       [title, description, document_type, file_path, file_size, file_type, vehicle_id || null, user_id || null]
     );
 
-    res.status(201).json({ id: result.insertId, file_path, message: 'Document uploaded successfully' });
+    res.status(201).json({ id: result.insertId, file_path, message: 'Document saved successfully' });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to upload document' });
+    res.status(500).json({ error: 'Failed to save document' });
   }
 });
+
 
 // Delete document
 router.delete('/:id', authenticate, authorize(['documents.delete']), async (req, res) => {
