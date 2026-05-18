@@ -3,11 +3,11 @@ const pool = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const router = express.Router();
 
-// Get all invoices
+// Get all invoices with vehicle info
 router.get('/', authenticate, async (req, res) => {
   try {
     const { status, vehicle_id, search } = req.query;
-    let query = `SELECT i.*, v.manufacturer, v.model 
+    let query = `SELECT i.*, v.manufacturer, v.model, v.license_plate 
                  FROM invoices i 
                  LEFT JOIN vehicles v ON i.vehicle_id = v.id 
                  WHERE 1=1`;
@@ -40,15 +40,17 @@ router.post('/', authenticate, authorize(['invoices.create']), async (req, res) 
   try {
     const {
       invoice_number, description, amount, vehicle_id, user_id,
-      due_date, recurring_type, recurring_interval
+      due_date, recurring_type, recurring_interval,
+      file_path, file_size, file_type
     } = req.body;
 
     const [result] = await pool.execute(
       `INSERT INTO invoices (invoice_number, description, amount, vehicle_id, user_id, 
-        due_date, status, recurring_type, recurring_interval, created_by) 
-       VALUES (?, ?, ?, ?, ?, ?, 'unpaid', ?, ?, ?)`,
+        due_date, status, recurring_type, recurring_interval, file_path, file_size, file_type, created_by) 
+       VALUES (?, ?, ?, ?, ?, ?, 'unpaid', ?, ?, ?, ?, ?, ?)`,
       [invoice_number, description, amount, vehicle_id || null, user_id || null,
-       due_date, recurring_type || null, recurring_interval || null, req.user.id]
+       due_date, recurring_type || null, recurring_interval || null,
+       file_path || null, file_size || null, file_type || null, req.user.id]
     );
 
     res.status(201).json({ id: result.insertId, message: 'Invoice created successfully' });
