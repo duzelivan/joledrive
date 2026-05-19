@@ -18,7 +18,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// Get single vehicle with service history
+// Get single vehicle with ALL related data (services, invoices, documents)
 router.get('/:id', authenticate, async (req, res) => {
   try {
     const [vehicles] = await pool.execute(
@@ -32,7 +32,7 @@ router.get('/:id', authenticate, async (req, res) => {
 
     const vehicle = vehicles[0];
 
-    // Get service history
+    // 1. Service history
     const [services] = await pool.execute(
       `SELECT s.*, u.name as mechanic_name 
        FROM services s 
@@ -41,10 +41,46 @@ router.get('/:id', authenticate, async (req, res) => {
       [req.params.id]
     );
 
+    // 2. Invoices with payment summary
+    const [invoices] = await pool.execute(
+      `SELECT i.*, COALESCE(SUM(p.amount), 0) as paid_amount,
+       (i.amount - COALESCE(SUM(p.amount), 0)) as remaining_amount
+       FROM invoices i 
+       LEFT JOIN invoice_payments p ON i.id = p.invoice_id
+       WHERE i.vehicle_id = ? 
+       GROUP BY i.id 
+       ORDER BY i.created_at DESC`,
+      [req.params.id]
+    );
+
+    // 3. Documents
+    const [documents] = await pool.execute(
+      `SELECT d.*, u.name as uploaded_by_name
+       FROM documents d 
+       LEFT JOIN users u ON d.user_id = u.id
+       WHERE d.vehicle_id = ? 
+       ORDER BY d.created_at DESC`,
+      [req.params.id]
+    );
+
+    // Compute status for invoices
+    const enrichedInvoices = invoices.map(inv => {
+      const paid = parseFloat(inv.paid_amount || 0);
+      const total = parseFloat(inv.amount);
+      let status = 'unpaid';
+      if (paid >= total) status = 'paid';
+      else if (paid > 0) status = 'partial';
+      return { ...inv, status };
+    });
+
     vehicle.service_history = services;
+    vehicle.invoices = enrichedInvoices;
+    vehicle.documents = documents;
+
     res.json(vehicle);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch vehicle' });
+    console.error('Fetch vehicle detail error:', error);
+    res.status(500).json({ error: 'Failed to fetch vehicle details' });
   }
 });
 
