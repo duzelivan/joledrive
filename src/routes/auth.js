@@ -6,6 +6,20 @@ const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 
+// Helper za sigurno parsiranje permissions
+const safeParsePermissions = (permissions) => {
+  if (!permissions) return {}
+  if (typeof permissions === 'string') {
+    try { return JSON.parse(permissions) } 
+    catch (e) { 
+      console.error('Failed to parse permissions:', permissions)
+      return {} 
+    }
+  }
+  if (typeof permissions === 'object') return permissions
+  return {}
+}
+
 // Login
 router.post('/login', async (req, res) => {
   try {
@@ -59,7 +73,7 @@ router.post('/login', async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        permissions: user.permissions ? (typeof user.permissions === 'string' ? JSON.parse(user.permissions) : user.permissions) : {}
+        permissions: safeParsePermissions(user.permissions)
       }
     });
   } catch (error) {
@@ -94,15 +108,20 @@ router.post('/setup-2fa', authenticate, async (req, res) => {
 
 // Verify session
 router.get('/me', authenticate, async (req, res) => {
-  res.json({
-    user: {
-      id: req.user.id,
-      name: req.user.name,
-      email: req.user.email,
-      role: req.user.role,
-      permissions: JSON.parse(req.user.permissions || '{}')
-    }
-  });
+  try {
+    res.json({
+      user: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        role: req.user.role,
+        permissions: safeParsePermissions(req.user.permissions)
+      }
+    })
+  } catch (error) {
+    console.error('Auth /me error:', error)
+    res.status(500).json({ error: 'Failed to get user data' })
+  }
 });
 
 module.exports = router;
