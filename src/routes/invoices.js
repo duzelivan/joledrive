@@ -3,23 +3,43 @@ const pool = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const router = express.Router();
 
+// Helper: izračunaj paid/remaining za jedan ili više računa
+async function enrichInvoiceWithPayments(invoice) {
+  if (!invoice) return null;
+  
+  const [payments] = await pool.execute(
+    'SELECT COALESCE(SUM(amount), 0) as total_paid FROM invoice_payments WHERE invoice_id = ?',
+    [invoice.id]
+  );
+  
+  const paid = parseFloat(payments[0].total_paid);
+  const total = parseFloat(invoice.amount);
+  const remaining = total - paid;
+  
+  // Odredi status na temelju uplata
+  let computedStatus = invoice.status;
+  if (paid >= total) computedStatus = 'paid';
+  else if (paid > 0) computedStatus = 'partial';
+  else computedStatus = 'unpaid';
+  
+  return {
+    ...invoice,
+    paid_amount: paid,
+    remaining_amount: remaining,
+    status: computedStatus // override s izračunatim statusom
+  };
+}
+
 // Get all invoices with vehicle info + payment summary
 router.get('/', authenticate, async (req, res) => {
   try {
     const { status, vehicle_id, search } = req.query;
-    let query = `SELECT i.*, v.manufacturer, v.model, v.license_plate,
-                 COALESCE(SUM(p.amount), 0) as paid_amount,
-                 (i.amount - COALESCE(SUM(p.amount), 0)) as remaining_amount
+    let query = `SELECT i.*, v.manufacturer, v.model, v.license_plate 
                  FROM invoices i 
                  LEFT JOIN vehicles v ON i.vehicle_id = v.id 
-                 LEFT JOIN invoice_payments p ON i.id = p.invoice_id
                  WHERE 1=1`;
     const params = [];
 
-    if (status) {
-      query += ' AND i.status = ?';
-      params.push(status);
-    }
     if (vehicle_id) {
       query += ' AND i.vehicle_id = ?';
       params.push(vehicle_id);
@@ -29,10 +49,22 @@ router.get('/', authenticate, async (req, res) => {
       params.push(`%${search}%`, `%${search}%`);
     }
 
-    query += ' GROUP BY i.id ORDER BY i.created_at DESC';
+    query += ' ORDER BY i.created_at DESC';
 
     const [invoices] = await pool.execute(query, params);
-    res.json(invoices);
+    
+    // Enrich svaki račun s podacima o plaćanju
+    const enrichedInvoices = await Promise.all(
+      invoices.map(inv => enrichInvoiceWithPayments(inv))
+    );
+    
+    // Filtriraj po statusu ako je zatraženo
+    let result = enrichedInvoices;
+    if (status) {
+      result = result.filter(inv => inv.status === status);
+    }
+    
+    res.json(result);
   } catch (error) {
     console.error('Fetch invoices error:', error);
     res.status(500).json({ error: 'Failed to fetch invoices' });
@@ -42,7 +74,6 @@ router.get('/', authenticate, async (req, res) => {
 // Get single invoice with payment history
 router.get('/:id', authenticate, async (req, res) => {
   try {
-    // Invoice + vehicle
     const [invoiceRows] = await pool.execute(
       `SELECT i.*, v.manufacturer, v.model, v.license_plate
        FROM invoices i 
@@ -55,19 +86,15 @@ router.get('/:id', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Invoice not found' });
     }
 
-    // Payment history
     const [payments] = await pool.execute(
       `SELECT * FROM invoice_payments WHERE invoice_id = ? ORDER BY payment_date DESC`,
       [req.params.id]
     );
 
-    const invoice = invoiceRows[0];
-    const paidAmount = payments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+    const invoice = await enrichInvoiceWithPayments(invoiceRows[0]);
     
     res.json({
       ...invoice,
-      paid_amount: paidAmount,
-      remaining_amount: parseFloat(invoice.amount) - paidAmount,
       payments: payments
     });
   } catch (error) {
@@ -87,12 +114,11 @@ router.post('/', authenticate, authorize(['invoices.create']), async (req, res) 
 
     const [result] = await pool.execute(
       `INSERT INTO invoices (invoice_number, description, amount, vehicle_id, user_id, 
-        due_date, status, recurring_type, recurring_interval, file_path, file_size, file_type, 
-        created_by, paid_amount, remaining_amount) 
-       VALUES (?, ?, ?, ?, ?, ?, 'unpaid', ?, ?, ?, ?, ?, ?, 0.00, ?)`,
+        due_date, status, recurring_type, recurring_interval, file_path, file_size, file_type, created_by) 
+       VALUES (?, ?, ?, ?, ?, ?, 'unpaid', ?, ?, ?, ?, ?, ?)`,
       [invoice_number, description, amount, vehicle_id || null, user_id || null,
        due_date, recurring_type || null, recurring_interval || null,
-       file_path || null, file_size || null, file_type || null, req.user.id, amount]
+       file_path || null, file_size || null, file_type || null, req.user.id]
     );
 
     res.status(201).json({ id: result.insertId, message: 'Invoice created successfully' });
@@ -108,7 +134,7 @@ router.post('/:id/payments', authenticate, authorize(['invoices.edit']), async (
     const { amount, payment_date, payment_method, notes } = req.body;
     const invoiceId = req.params.id;
 
-    // Dohvati trenutni račun
+    // Dohvati račun
     const [invoiceRows] = await pool.execute(
       'SELECT * FROM invoices WHERE id = ?', [invoiceId]
     );
@@ -144,22 +170,18 @@ router.post('/:id/payments', authenticate, authorize(['invoices.edit']), async (
 
     // Ažuriraj status računa
     let newStatus = 'partial';
-    let remaining = totalAmount - newPaid;
-    
-    if (remaining <= 0) {
-      newStatus = 'paid';
-      remaining = 0;
-    }
+    if (newPaid >= totalAmount) newStatus = 'paid';
+    else if (newPaid <= 0) newStatus = 'unpaid';
 
     await pool.execute(
-      `UPDATE invoices SET status = ?, paid_amount = ?, remaining_amount = ?, paid_at = ? WHERE id = ?`,
-      [newStatus, newPaid, remaining, newStatus === 'paid' ? new Date() : null, invoiceId]
+      'UPDATE invoices SET status = ? WHERE id = ?',
+      [newStatus, invoiceId]
     );
 
     res.json({ 
       message: newStatus === 'paid' ? 'Invoice fully paid' : 'Partial payment recorded',
       paid_amount: newPaid,
-      remaining_amount: remaining,
+      remaining_amount: totalAmount - newPaid,
       status: newStatus
     });
   } catch (error) {
@@ -173,14 +195,13 @@ router.put('/:id/pay', authenticate, authorize(['invoices.edit']), async (req, r
   try {
     const invoiceId = req.params.id;
     
-    // Dohvati račun
     const [invoiceRows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
     if (invoiceRows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
     
     const invoice = invoiceRows[0];
     const totalAmount = parseFloat(invoice.amount);
     
-    // Provjeri je li već plaćeno
+    // Dohvati trenutno plaćeno
     const [paymentSum] = await pool.execute(
       'SELECT COALESCE(SUM(amount), 0) as total_paid FROM invoice_payments WHERE invoice_id = ?',
       [invoiceId]
@@ -198,30 +219,25 @@ router.put('/:id/pay', authenticate, authorize(['invoices.edit']), async (req, r
 
     // Ažuriraj status
     await pool.execute(
-      'UPDATE invoices SET status = ?, paid_amount = ?, remaining_amount = 0.00, paid_at = NOW() WHERE id = ?',
-      ['paid', totalAmount, invoiceId]
+      'UPDATE invoices SET status = ?, paid_at = NOW() WHERE id = ?',
+      ['paid', invoiceId]
     );
 
     res.json({ message: 'Invoice marked as fully paid' });
   } catch (error) {
     console.error('Full pay error:', error);
-    res.status(500).json({ error: 'Failed to update invoice' });
+    res.status(500). { error: 'Failed to update invoice' });
   }
 });
 
-// Update invoice (osnovni podaci, ne plaćanja)
+// Update invoice (osnovni podaci)
 router.put('/:id', authenticate, authorize(['invoices.edit']), async (req, res) => {
   try {
     const { invoice_number, description, amount, due_date, status } = req.body;
     
-    // Ako se mijenja iznos, prilagodi remaining
-    const [current] = await pool.execute('SELECT paid_amount FROM invoices WHERE id = ?', [req.params.id]);
-    const paid = current[0]?.paid_amount || 0;
-    const remaining = parseFloat(amount) - parseFloat(paid);
-    
     await pool.execute(
-      'UPDATE invoices SET invoice_number = ?, description = ?, amount = ?, due_date = ?, status = ?, remaining_amount = ? WHERE id = ?',
-      [invoice_number, description, amount, due_date, status, remaining < 0 ? 0 : remaining, req.params.id]
+      'UPDATE invoices SET invoice_number = ?, description = ?, amount = ?, due_date = ?, status = ? WHERE id = ?',
+      [invoice_number, description, amount, due_date, status, req.params.id]
     );
     res.json({ message: 'Invoice updated successfully' });
   } catch (error) {
