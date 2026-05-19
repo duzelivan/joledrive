@@ -226,7 +226,7 @@ router.put('/:id/pay', authenticate, authorize(['invoices.edit']), async (req, r
     res.json({ message: 'Invoice marked as fully paid' });
   } catch (error) {
     console.error('Full pay error:', error);
-    res.status(500). { error: 'Failed to update invoice' });
+    res.status(500).json({ error: 'Failed to update invoice' });
   }
 });
 
