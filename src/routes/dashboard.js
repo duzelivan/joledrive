@@ -40,15 +40,19 @@ router.get('/', authenticate, async (req, res) => {
     // === RAČUNI - TRI ZASEBNA BROJA ===
 
     // 1. Potpuno neplaćeni
-    const [[unpaidInvoices]] = await pool.execute(
-      'SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM invoices WHERE status = "unpaid"'
+    const [[unpaidCount]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM invoices WHERE status = "unpaid"'
+    );
+    const [[unpaidSum]] = await pool.execute(
+      'SELECT COALESCE(SUM(amount), 0) as total FROM invoices WHERE status = "unpaid"'
     );
 
-    // 2. Djelomično plaćeni (broj i preostali iznos)
-    const [[partialInvoices]] = await pool.execute(`
-      SELECT 
-        COUNT(*) as count,
-        COALESCE(SUM(i.amount - COALESCE(p.paid_total, 0)), 0) as total
+    // 2. Djelomično plaćeni
+    const [[partialCount]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM invoices WHERE status = "partial"'
+    );
+    const [[partialSum]] = await pool.execute(`
+      SELECT COALESCE(SUM(i.amount - COALESCE(p.paid_total, 0)), 0) as total
       FROM invoices i
       LEFT JOIN (
         SELECT invoice_id, SUM(amount) as paid_total 
@@ -58,13 +62,18 @@ router.get('/', authenticate, async (req, res) => {
       WHERE i.status = "partial"
     `);
 
-    // 3. Plaćeni (za referencu)
-    const [[paidInvoices]] = await pool.execute(
-      'SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM invoices WHERE status = "paid"'
+    // 3. Plaćeni
+    const [[paidCount]] = await pool.execute(
+      'SELECT COUNT(*) as count FROM invoices WHERE status = "paid"'
+    );
+    const [[paidSum]] = await pool.execute(
+      'SELECT COALESCE(SUM(amount), 0) as total FROM invoices WHERE status = "paid"'
     );
 
-    // Ukupno za platiti (neplaćeni + preostalo na parcijalnim)
-    const totalDue = parseFloat(unpaidInvoices.total) + parseFloat(partialInvoices.total);
+    // Ukupno za platiti
+    const unpaidTotal = parseFloat(unpaidSum.total) || 0;
+    const partialTotal = parseFloat(partialSum.total) || 0;
+    const totalDue = unpaidTotal + partialTotal;
 
     // Stats
     const [[vehicleCount]] = await pool.execute('SELECT COUNT(*) as count FROM vehicles');
@@ -76,14 +85,12 @@ router.get('/', authenticate, async (req, res) => {
       stats: {
         vehicles: vehicleCount.count,
         completedServices: serviceCount.count,
-        // Tri zasebna broja za račune
-        unpaidInvoices: unpaidInvoices.count,
-        unpaidTotal: unpaidInvoices.total,
-        partialInvoices: partialInvoices.count,
-        partialTotal: partialInvoices.total,
-        paidInvoices: paidInvoices.count,
-        paidTotal: paidInvoices.total,
-        // Ukupno za platiti
+        unpaidInvoices: unpaidCount.count,
+        unpaidTotal: unpaidTotal,
+        partialInvoices: partialCount.count,
+        partialTotal: partialTotal,
+        paidInvoices: paidCount.count,
+        paidTotal: parseFloat(paidSum.total) || 0,
         totalDue: totalDue
       }
     });
