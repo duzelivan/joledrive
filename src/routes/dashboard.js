@@ -3,7 +3,18 @@ const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 
-// Get dashboard data
+// Helper: izračunaj status računa iz uplata
+async function getInvoiceStatus(invoiceId, totalAmount) {
+  const [payments] = await pool.execute(
+    'SELECT COALESCE(SUM(amount), 0) as paid FROM invoice_payments WHERE invoice_id = ?',
+    [invoiceId]
+  );
+  const paid = parseFloat(payments[0].paid);
+  if (paid >= totalAmount) return 'paid';
+  if (paid > 0) return 'partial';
+  return 'unpaid';
+}
+
 router.get('/', authenticate, async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
@@ -37,42 +48,40 @@ router.get('/', authenticate, async (req, res) => {
       [today]
     );
 
-    // === RAČUNI - TRI ZASEBNA BROJA ===
-
-    // 1. Potpuno neplaćeni
-    const [[unpaidCount]] = await pool.execute(
-      'SELECT COUNT(*) as count FROM invoices WHERE status = "unpaid"'
-    );
-    const [[unpaidSum]] = await pool.execute(
-      'SELECT COALESCE(SUM(amount), 0) as total FROM invoices WHERE status = "unpaid"'
-    );
-
-    // 2. Djelomično plaćeni
-    const [[partialCount]] = await pool.execute(
-      'SELECT COUNT(*) as count FROM invoices WHERE status = "partial"'
-    );
-    const [[partialSum]] = await pool.execute(`
-      SELECT COALESCE(SUM(i.amount - COALESCE(p.paid_total, 0)), 0) as total
+    // === RAČUNI - izračunaj iz invoice_payments ===
+    
+    // Dohvati sve račune s podacima o uplati
+    const [invoices] = await pool.execute(`
+      SELECT i.*, COALESCE(SUM(p.amount), 0) as paid_amount
       FROM invoices i
-      LEFT JOIN (
-        SELECT invoice_id, SUM(amount) as paid_total 
-        FROM invoice_payments 
-        GROUP BY invoice_id
-      ) p ON i.id = p.invoice_id
-      WHERE i.status = "partial"
+      LEFT JOIN invoice_payments p ON i.id = p.invoice_id
+      GROUP BY i.id
     `);
 
-    // 3. Plaćeni
-    const [[paidCount]] = await pool.execute(
-      'SELECT COUNT(*) as count FROM invoices WHERE status = "paid"'
-    );
-    const [[paidSum]] = await pool.execute(
-      'SELECT COALESCE(SUM(amount), 0) as total FROM invoices WHERE status = "paid"'
-    );
+    let unpaidCount = 0, unpaidTotal = 0;
+    let partialCount = 0, partialTotal = 0;
+    let paidCount = 0, paidTotal = 0;
 
-    // Ukupno za platiti
-    const unpaidTotal = parseFloat(unpaidSum.total) || 0;
-    const partialTotal = parseFloat(partialSum.total) || 0;
+    for (const inv of invoices) {
+      const paid = parseFloat(inv.paid_amount);
+      const total = parseFloat(inv.amount);
+      const remaining = total - paid;
+
+      if (paid >= total) {
+        // Plaćen
+        paidCount++;
+        paidTotal += total;
+      } else if (paid > 0) {
+        // Djelomično
+        partialCount++;
+        partialTotal += remaining;
+      } else {
+        // Neplaćen
+        unpaidCount++;
+        unpaidTotal += total;
+      }
+    }
+
     const totalDue = unpaidTotal + partialTotal;
 
     // Stats
@@ -85,12 +94,12 @@ router.get('/', authenticate, async (req, res) => {
       stats: {
         vehicles: vehicleCount.count,
         completedServices: serviceCount.count,
-        unpaidInvoices: unpaidCount.count,
+        unpaidInvoices: unpaidCount,
         unpaidTotal: unpaidTotal,
-        partialInvoices: partialCount.count,
+        partialInvoices: partialCount,
         partialTotal: partialTotal,
-        paidInvoices: paidCount.count,
-        paidTotal: parseFloat(paidSum.total) || 0,
+        paidInvoices: paidCount,
+        paidTotal: paidTotal,
         totalDue: totalDue
       }
     });
