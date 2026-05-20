@@ -4,10 +4,14 @@ const EMAIL_API_URL = process.env.EMAIL_API_URL || 'https://joledrive.com/api/se
 
 async function sendEmail(to, subject, html) {
   try {
+    // Pretvori array u string (comma-separated)
+    const toString = Array.isArray(to) ? to.join(', ') : to;
+    
     console.log('Sending email via hosting API:', EMAIL_API_URL);
+    console.log('To:', toString);
     
     const response = await axios.post(EMAIL_API_URL, {
-      to: Array.isArray(to) ? to : [to],
+      to: toString,           // Sada šaljemo string, ne array
       subject,
       html,
       from: process.env.SMTP_USER || 'info@joledrive.com'
@@ -27,6 +31,10 @@ async function sendEmail(to, subject, html) {
     }
   } catch (error) {
     console.error('Email API error:', error.message);
+    if (error.response) {
+      console.error('Response data:', error.response.data);
+      console.error('Status:', error.response.status);
+    }
     return { success: false, error: error.message };
   }
 }
