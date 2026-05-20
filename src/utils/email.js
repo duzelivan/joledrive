@@ -1,50 +1,32 @@
-const nodemailer = require('nodemailer');
+const axios = require('axios');
 
-// Environment varijable
-const SMTP_HOST = process.env.SMTP_HOST || 'pro3.crohost.net';
-const SMTP_PORT = Number(process.env.SMTP_PORT) || 587;  // 587 umjesto 465!
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
-
-console.log('SMTP Config:', {
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  user: SMTP_USER ? 'SET' : 'MISSING',
-  pass: SMTP_PASS ? 'SET' : 'MISSING'
-});
-
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: false,          // STARTTLS umjesto SSL
-  requireTLS: true,       // Zahtijevaj TLS
-  auth: {
-    user: SMTP_USER,
-    pass: SMTP_PASS
-  },
-  tls: {
-    rejectUnauthorized: false  // Za self-signed certifikate
-  },
-  debug: true,
-  logger: true
-});
+const EMAIL_API_URL = process.env.EMAIL_API_URL || 'https://joledrive.com/api/send-email.php';
 
 async function sendEmail(to, subject, html) {
   try {
-    console.log('Verifying SMTP connection...');
-    await transporter.verify();
-    console.log('SMTP connection OK');
+    console.log('Sending email via hosting API:', EMAIL_API_URL);
     
-    const result = await transporter.sendMail({
-      from: `"JoleDrive" <${SMTP_USER}>`,
-      to: Array.isArray(to) ? to.join(', ') : to,
+    const response = await axios.post(EMAIL_API_URL, {
+      to: Array.isArray(to) ? to : [to],
       subject,
-      html
+      html,
+      from: process.env.SMTP_USER || 'info@joledrive.com'
+    }, {
+      timeout: 10000,
+      headers: {
+        'Content-Type': 'application/json'
+      }
     });
-    console.log('Email sent:', result.messageId);
-    return { success: true, messageId: result.messageId };
+
+    console.log('Email API response:', response.data);
+    
+    if (response.data.success) {
+      return { success: true, messageId: response.data.messageId };
+    } else {
+      return { success: false, error: response.data.error };
+    }
   } catch (error) {
-    console.error('Email error:', error.code, error.message);
+    console.error('Email API error:', error.message);
     return { success: false, error: error.message };
   }
 }
