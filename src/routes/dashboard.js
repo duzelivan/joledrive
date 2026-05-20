@@ -3,18 +3,6 @@ const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 
-// Helper: izračunaj status računa iz uplata
-async function getInvoiceStatus(invoiceId, totalAmount) {
-  const [payments] = await pool.execute(
-    'SELECT COALESCE(SUM(amount), 0) as paid FROM invoice_payments WHERE invoice_id = ?',
-    [invoiceId]
-  );
-  const paid = parseFloat(payments[0].paid);
-  if (paid >= totalAmount) return 'paid';
-  if (paid > 0) return 'partial';
-  return 'unpaid';
-}
-
 router.get('/', authenticate, async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
@@ -50,39 +38,68 @@ router.get('/', authenticate, async (req, res) => {
 
     // === RAČUNI - izračunaj iz invoice_payments ===
     
-    // Dohvati sve račune s podacima o uplati
     const [invoices] = await pool.execute(`
-      SELECT i.*, COALESCE(SUM(p.amount), 0) as paid_amount
+      SELECT i.id, i.invoice_number, i.amount, COALESCE(SUM(p.amount), 0) as paid_amount
       FROM invoices i
       LEFT JOIN invoice_payments p ON i.id = p.invoice_id
-      GROUP BY i.id
+      GROUP BY i.id, i.invoice_number, i.amount
     `);
+
+    console.log('=== DASHBOARD DEBUG ===');
+    console.log('Invoices fetched:', invoices.length);
+    if (invoices.length > 0) {
+      console.log('First invoice raw:', invoices[0]);
+      console.log('Amount type:', typeof invoices[0].amount);
+      console.log('Paid_amount type:', typeof invoices[0].paid_amount);
+    }
 
     let unpaidCount = 0, unpaidTotal = 0;
     let partialCount = 0, partialTotal = 0;
     let paidCount = 0, paidTotal = 0;
 
     for (const inv of invoices) {
-      const paid = parseFloat(inv.paid_amount);
-      const total = parseFloat(inv.amount);
+      // Sigurno parsiranje - zaštita protiv null/undefined/NaN
+      const amount = inv.amount;
+      const paidAmount = inv.paid_amount;
+      
+      console.log(`Invoice ${inv.invoice_number}: amount=${amount} (type=${typeof amount}), paid=${paidAmount} (type=${typeof paidAmount})`);
+      
+      // Konvertiraj u broj s zaštitom
+      const total = parseFloat(amount);
+      const paid = parseFloat(paidAmount);
+      
+      if (isNaN(total) || isNaN(paid)) {
+        console.log(`  SKIPPED - NaN detected: total=${total}, paid=${paid}`);
+        continue;
+      }
+      
+      if (total <= 0) {
+        console.log(`  SKIPPED - total <= 0`);
+        continue;
+      }
+
       const remaining = total - paid;
+      console.log(`  Parsed: total=${total}, paid=${paid}, remaining=${remaining}`);
 
       if (paid >= total) {
-        // Plaćen
         paidCount++;
         paidTotal += total;
+        console.log(`  -> PAID`);
       } else if (paid > 0) {
-        // Djelomično
         partialCount++;
         partialTotal += remaining;
+        console.log(`  -> PARTIAL`);
       } else {
-        // Neplaćen
         unpaidCount++;
         unpaidTotal += total;
+        console.log(`  -> UNPAID`);
       }
     }
 
     const totalDue = unpaidTotal + partialTotal;
+    
+    console.log('=== FINAL RESULTS ===');
+    console.log({ unpaidCount, unpaidTotal, partialCount, partialTotal, paidCount, paidTotal, totalDue });
 
     // Stats
     const [[vehicleCount]] = await pool.execute('SELECT COUNT(*) as count FROM vehicles');
@@ -92,8 +109,8 @@ router.get('/', authenticate, async (req, res) => {
       notifications,
       upcomingServices,
       stats: {
-        vehicles: vehicleCount.count,
-        completedServices: serviceCount.count,
+        vehicles: vehicleCount.count || 0,
+        completedServices: serviceCount.count || 0,
         unpaidInvoices: unpaidCount,
         unpaidTotal: unpaidTotal,
         partialInvoices: partialCount,
