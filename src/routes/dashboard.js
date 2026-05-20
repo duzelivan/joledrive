@@ -36,70 +36,44 @@ router.get('/', authenticate, async (req, res) => {
       [today]
     );
 
-    // === RAČUNI - izračunaj iz invoice_payments ===
-    
-    const [invoices] = await pool.execute(`
-      SELECT i.id, i.invoice_number, i.amount, COALESCE(SUM(p.amount), 0) as paid_amount
+    // === RAČUNI - tri zasebna upita, bez JOIN-a ===
+
+    // 1. Neplaćeni (bez uplata)
+    const [unpaidResult] = await pool.execute(`
+      SELECT i.id, i.amount 
       FROM invoices i
       LEFT JOIN invoice_payments p ON i.id = p.invoice_id
-      GROUP BY i.id, i.invoice_number, i.amount
+      WHERE p.id IS NULL
     `);
+    
+    let unpaidCount = unpaidResult.length;
+    let unpaidTotal = unpaidResult.reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0);
 
-    console.log('=== DASHBOARD DEBUG ===');
-    console.log('Invoices fetched:', invoices.length);
-    if (invoices.length > 0) {
-      console.log('First invoice raw:', invoices[0]);
-      console.log('Amount type:', typeof invoices[0].amount);
-      console.log('Paid_amount type:', typeof invoices[0].paid_amount);
-    }
+    // 2. Djelomično plaćeni (ima uplatu, ali manje od iznosa)
+    const [partialResult] = await pool.execute(`
+      SELECT i.id, i.amount, SUM(p.amount) as paid
+      FROM invoices i
+      JOIN invoice_payments p ON i.id = p.invoice_id
+      GROUP BY i.id, i.amount
+      HAVING paid < i.amount
+    `);
+    
+    let partialCount = partialResult.length;
+    let partialTotal = partialResult.reduce((sum, inv) => sum + ((Number(inv.amount) || 0) - (Number(inv.paid) || 0)), 0);
 
-    let unpaidCount = 0, unpaidTotal = 0;
-    let partialCount = 0, partialTotal = 0;
-    let paidCount = 0, paidTotal = 0;
-
-    for (const inv of invoices) {
-      // Sigurno parsiranje - zaštita protiv null/undefined/NaN
-      const amount = inv.amount;
-      const paidAmount = inv.paid_amount;
-      
-      console.log(`Invoice ${inv.invoice_number}: amount=${amount} (type=${typeof amount}), paid=${paidAmount} (type=${typeof paidAmount})`);
-      
-      // Konvertiraj u broj s zaštitom
-      const total = parseFloat(amount);
-      const paid = parseFloat(paidAmount);
-      
-      if (isNaN(total) || isNaN(paid)) {
-        console.log(`  SKIPPED - NaN detected: total=${total}, paid=${paid}`);
-        continue;
-      }
-      
-      if (total <= 0) {
-        console.log(`  SKIPPED - total <= 0`);
-        continue;
-      }
-
-      const remaining = total - paid;
-      console.log(`  Parsed: total=${total}, paid=${paid}, remaining=${remaining}`);
-
-      if (paid >= total) {
-        paidCount++;
-        paidTotal += total;
-        console.log(`  -> PAID`);
-      } else if (paid > 0) {
-        partialCount++;
-        partialTotal += remaining;
-        console.log(`  -> PARTIAL`);
-      } else {
-        unpaidCount++;
-        unpaidTotal += total;
-        console.log(`  -> UNPAID`);
-      }
-    }
+    // 3. Plaćeni (uplata >= iznos)
+    const [paidResult] = await pool.execute(`
+      SELECT i.id, i.amount
+      FROM invoices i
+      JOIN invoice_payments p ON i.id = p.invoice_id
+      GROUP BY i.id, i.amount
+      HAVING SUM(p.amount) >= i.amount
+    `);
+    
+    let paidCount = paidResult.length;
+    let paidTotal = paidResult.reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0);
 
     const totalDue = unpaidTotal + partialTotal;
-    
-    console.log('=== FINAL RESULTS ===');
-    console.log({ unpaidCount, unpaidTotal, partialCount, partialTotal, paidCount, paidTotal, totalDue });
 
     // Stats
     const [[vehicleCount]] = await pool.execute('SELECT COUNT(*) as count FROM vehicles');
@@ -109,8 +83,8 @@ router.get('/', authenticate, async (req, res) => {
       notifications,
       upcomingServices,
       stats: {
-        vehicles: vehicleCount.count || 0,
-        completedServices: serviceCount.count || 0,
+        vehicles: Number(vehicleCount.count) || 0,
+        completedServices: Number(serviceCount.count) || 0,
         unpaidInvoices: unpaidCount,
         unpaidTotal: unpaidTotal,
         partialInvoices: partialCount,
@@ -122,7 +96,7 @@ router.get('/', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Dashboard error:', error);
-    res.status(500).json({ error: 'Failed to fetch dashboard data' });
+    res.status(500).json({ error: 'Failed to fetch dashboard data', details: error.message });
   }
 });
 
