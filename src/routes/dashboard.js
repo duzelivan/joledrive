@@ -6,10 +6,10 @@ const router = express.Router();
 // Get dashboard data
 router.get('/', authenticate, async (req, res) => {
   try {
-    // Notifications - expired or expiring soon
     const today = new Date().toISOString().split('T')[0];
     const thirtyDaysLater = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
+    // Notifications
     const [notifications] = await pool.execute(
       `SELECT id, manufacturer, model, registration_date, yellow_card_date, pp_apparatus_date,
         CASE 
@@ -37,11 +37,38 @@ router.get('/', authenticate, async (req, res) => {
       [today]
     );
 
+    // === RAČUNI - TRI ZASEBNA BROJA ===
+
+    // 1. Potpuno neplaćeni
+    const [[unpaidInvoices]] = await pool.execute(
+      'SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM invoices WHERE status = "unpaid"'
+    );
+
+    // 2. Djelomično plaćeni (broj i preostali iznos)
+    const [[partialInvoices]] = await pool.execute(`
+      SELECT 
+        COUNT(*) as count,
+        COALESCE(SUM(i.amount - COALESCE(p.paid_total, 0)), 0) as total
+      FROM invoices i
+      LEFT JOIN (
+        SELECT invoice_id, SUM(amount) as paid_total 
+        FROM invoice_payments 
+        GROUP BY invoice_id
+      ) p ON i.id = p.invoice_id
+      WHERE i.status = "partial"
+    `);
+
+    // 3. Plaćeni (za referencu)
+    const [[paidInvoices]] = await pool.execute(
+      'SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM invoices WHERE status = "paid"'
+    );
+
+    // Ukupno za platiti (neplaćeni + preostalo na parcijalnim)
+    const totalDue = parseFloat(unpaidInvoices.total) + parseFloat(partialInvoices.total);
+
     // Stats
     const [[vehicleCount]] = await pool.execute('SELECT COUNT(*) as count FROM vehicles');
     const [[serviceCount]] = await pool.execute('SELECT COUNT(*) as count FROM services WHERE status = "completed"');
-    const [[unpaidInvoices]] = await pool.execute('SELECT COUNT(*) as count FROM invoices WHERE status = "unpaid"');
-    const [[totalUnpaid]] = await pool.execute('SELECT COALESCE(SUM(amount), 0) as total FROM invoices WHERE status = "unpaid"');
 
     res.json({
       notifications,
@@ -49,11 +76,19 @@ router.get('/', authenticate, async (req, res) => {
       stats: {
         vehicles: vehicleCount.count,
         completedServices: serviceCount.count,
+        // Tri zasebna broja za račune
         unpaidInvoices: unpaidInvoices.count,
-        totalUnpaid: totalUnpaid.total
+        unpaidTotal: unpaidInvoices.total,
+        partialInvoices: partialInvoices.count,
+        partialTotal: partialInvoices.total,
+        paidInvoices: paidInvoices.count,
+        paidTotal: paidInvoices.total,
+        // Ukupno za platiti
+        totalDue: totalDue
       }
     });
   } catch (error) {
+    console.error('Dashboard error:', error);
     res.status(500).json({ error: 'Failed to fetch dashboard data' });
   }
 });
@@ -67,7 +102,6 @@ router.get('/analytics', authenticate, async (req, res) => {
     let params = [];
 
     if (period === 'month') {
-      // Monthly breakdown for selected year
       incomeQuery = `SELECT MONTH(created_at) as period, COALESCE(SUM(amount), 0) as total 
                       FROM invoices WHERE status = 'paid' AND YEAR(created_at) = ? 
                       GROUP BY MONTH(created_at)`;
@@ -76,7 +110,6 @@ router.get('/analytics', authenticate, async (req, res) => {
                        GROUP BY MONTH(service_date)`;
       params = [year || new Date().getFullYear()];
     } else if (period === 'week') {
-      // Weekly breakdown for selected month
       incomeQuery = `SELECT WEEK(created_at) as period, COALESCE(SUM(amount), 0) as total 
                       FROM invoices WHERE status = 'paid' AND YEAR(created_at) = ? AND MONTH(created_at) = ? 
                       GROUP BY WEEK(created_at)`;
@@ -85,7 +118,6 @@ router.get('/analytics', authenticate, async (req, res) => {
                        GROUP BY WEEK(service_date)`;
       params = [year || new Date().getFullYear(), month || new Date().getMonth() + 1];
     } else {
-      // Default: last 12 months
       incomeQuery = `SELECT DATE_FORMAT(created_at, '%Y-%m') as period, COALESCE(SUM(amount), 0) as total 
                       FROM invoices WHERE status = 'paid' AND created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
                       GROUP BY DATE_FORMAT(created_at, '%Y-%m')`;
@@ -99,6 +131,7 @@ router.get('/analytics', authenticate, async (req, res) => {
 
     res.json({ income, expenses });
   } catch (error) {
+    console.error('Analytics error:', error);
     res.status(500).json({ error: 'Failed to fetch analytics' });
   }
 });
