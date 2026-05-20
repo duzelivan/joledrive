@@ -8,9 +8,9 @@ router.get('/', authenticate, async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const thirtyDaysLater = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    // Notifications
+    // Notifications - with license_plate
     const [notifications] = await pool.execute(
-      `SELECT id, manufacturer, model, registration_date, yellow_card_date, pp_apparatus_date,
+      `SELECT id, manufacturer, model, license_plate, registration_date, yellow_card_date, pp_apparatus_date,
         CASE 
           WHEN registration_date <= ? THEN 'REGISTRATION_EXPIRED'
           WHEN registration_date <= ? THEN 'REGISTRATION_EXPIRING'
@@ -36,7 +36,7 @@ router.get('/', authenticate, async (req, res) => {
       [today]
     );
 
-    // === RAČUNI - tri zasebna upita, bez JOIN-a ===
+    // === RAČUNI - tri zasebna upita ===
 
     // 1. Neplaćeni (bez uplata)
     const [unpaidResult] = await pool.execute(`
@@ -49,7 +49,7 @@ router.get('/', authenticate, async (req, res) => {
     let unpaidCount = unpaidResult.length;
     let unpaidTotal = unpaidResult.reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0);
 
-    // 2. Djelomično plaćeni (ima uplatu, ali manje od iznosa)
+    // 2. Djelomično plaćeni
     const [partialResult] = await pool.execute(`
       SELECT i.id, i.amount, SUM(p.amount) as paid
       FROM invoices i
@@ -61,7 +61,7 @@ router.get('/', authenticate, async (req, res) => {
     let partialCount = partialResult.length;
     let partialTotal = partialResult.reduce((sum, inv) => sum + ((Number(inv.amount) || 0) - (Number(inv.paid) || 0)), 0);
 
-    // 3. Plaćeni (uplata >= iznos)
+    // 3. Plaćeni
     const [paidResult] = await pool.execute(`
       SELECT i.id, i.amount
       FROM invoices i
