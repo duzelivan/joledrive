@@ -1,10 +1,9 @@
 const express = require('express');
 const pool = require('../config/database');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-// Dohvati sve postavke
-router.get('/', authenticate, async (req, res) => {
+router.get('/', authenticate, authorizeEntity('settings'), async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT setting_key, setting_value FROM settings');
     const settings = {};
@@ -17,8 +16,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// Ažuriraj postavku
-router.put('/:key', authenticate, authorize(['settings.edit']), async (req, res) => {
+router.put('/:key', authenticate, authorizeEntity('settings'), authorize(['settings.edit']), async (req, res) => {
   try {
     const { key } = req.params;
     const { value } = req.body;
@@ -34,8 +32,7 @@ router.put('/:key', authenticate, authorize(['settings.edit']), async (req, res)
   }
 });
 
-// Dohvati sve emailove za obavijesti
-router.get('/notification-emails', authenticate, async (req, res) => {
+router.get('/notification-emails', authenticate, authorizeEntity('settings'), async (req, res) => {
   try {
     const [rows] = await pool.execute(
       'SELECT setting_value FROM settings WHERE setting_key = ?',
@@ -53,8 +50,7 @@ router.get('/notification-emails', authenticate, async (req, res) => {
   }
 });
 
-// Dodaj novi email
-router.post('/notification-emails', authenticate, authorize(['settings.edit']), async (req, res) => {
+router.post('/notification-emails', authenticate, authorizeEntity('settings'), authorize(['settings.edit']), async (req, res) => {
   try {
     const { email } = req.body;
     
@@ -72,9 +68,8 @@ router.post('/notification-emails', authenticate, authorize(['settings.edit']), 
       emails = rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
     }
 
-    // Provjeri jeli već dodan
     if (emails.includes(email)) {
-      return res.status(400).json({ error: 'Email already exists' });  // ← ISPRAVLJENO
+      return res.status(400).json({ error: 'Email already exists' });
     }
 
     emails.push(email);
@@ -91,8 +86,7 @@ router.post('/notification-emails', authenticate, authorize(['settings.edit']), 
   }
 });
 
-// Obriši email
-router.delete('/notification-emails/:email', authenticate, authorize(['settings.edit']), async (req, res) => {
+router.delete('/notification-emails/:email', authenticate, authorizeEntity('settings'), authorize(['settings.edit']), async (req, res) => {
   try {
     const emailToDelete = decodeURIComponent(req.params.email);
 
@@ -107,7 +101,6 @@ router.delete('/notification-emails/:email', authenticate, authorize(['settings.
 
     let emails = rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
     
-    // Ukloni email
     const filtered = emails.filter(e => e !== emailToDelete);
     
     if (filtered.length === emails.length) {
