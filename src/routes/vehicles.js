@@ -1,10 +1,9 @@
 const express = require('express');
 const pool = require('../config/database');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-// Get all vehicles with assigned user
-router.get('/', authenticate, async (req, res) => {
+router.get('/', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
     const [vehicles] = await pool.execute(
       `SELECT v.*, u.name as assigned_name 
@@ -18,8 +17,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// Get single vehicle with ALL related data (services, invoices, documents)
-router.get('/:id', authenticate, async (req, res) => {
+router.get('/:id', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
     const [vehicles] = await pool.execute(
       `SELECT v.*, u.name as assigned_name 
@@ -32,7 +30,6 @@ router.get('/:id', authenticate, async (req, res) => {
 
     const vehicle = vehicles[0];
 
-    // 1. Service history
     const [services] = await pool.execute(
       `SELECT s.*, u.name as mechanic_name 
        FROM services s 
@@ -41,7 +38,6 @@ router.get('/:id', authenticate, async (req, res) => {
       [req.params.id]
     );
 
-    // 2. Invoices with payment summary
     const [invoices] = await pool.execute(
       `SELECT i.*, COALESCE(SUM(p.amount), 0) as paid_amount,
        (i.amount - COALESCE(SUM(p.amount), 0)) as remaining_amount
@@ -53,7 +49,6 @@ router.get('/:id', authenticate, async (req, res) => {
       [req.params.id]
     );
 
-    // 3. Documents
     const [documents] = await pool.execute(
       `SELECT d.*, u.name as uploaded_by_name
        FROM documents d 
@@ -63,7 +58,6 @@ router.get('/:id', authenticate, async (req, res) => {
       [req.params.id]
     );
 
-    // Compute status for invoices
     const enrichedInvoices = invoices.map(inv => {
       const paid = parseFloat(inv.paid_amount || 0);
       const total = parseFloat(inv.amount);
@@ -84,8 +78,7 @@ router.get('/:id', authenticate, async (req, res) => {
   }
 });
 
-// Create vehicle
-router.post('/', authenticate, authorize(['vehicles.create']), async (req, res) => {
+router.post('/', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.create']), async (req, res) => {
   try {
     const { manufacturer, model, license_plate, chassis_number, year, mileage,
       fuel_type, color, registration_date, yellow_card_date,
@@ -108,8 +101,7 @@ router.post('/', authenticate, authorize(['vehicles.create']), async (req, res) 
   }
 });
 
-// Update vehicle
-router.put('/:id', authenticate, authorize(['vehicles.edit']), async (req, res) => {
+router.put('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.edit']), async (req, res) => {
   try {
     const { manufacturer, model, license_plate, chassis_number, year, mileage,
       fuel_type, color, registration_date, yellow_card_date,
@@ -146,8 +138,7 @@ router.put('/:id', authenticate, authorize(['vehicles.edit']), async (req, res) 
   }
 });
 
-// Delete vehicle
-router.delete('/:id', authenticate, authorize(['vehicles.delete']), async (req, res) => {
+router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.delete']), async (req, res) => {
   try {
     await pool.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
     res.json({ message: 'Vehicle deleted successfully' });
