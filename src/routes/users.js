@@ -15,7 +15,23 @@ router.get('/', authenticate, authorizeEntity('users'), requireAdmin, async (req
     );
     res.json(users);
   } catch (error) {
+    console.error('Fetch users error:', error);
     res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+router.get('/clients', authenticate, authorizeEntity('users'), async (req, res) => {
+  try {
+    const [clients] = await pool.execute(
+      `SELECT id, name, phone, driver_license, address, oib, company_name, company_oib 
+       FROM users 
+       WHERE type = 'client' AND active = 1
+       ORDER BY name ASC`
+    );
+    res.json(clients);
+  } catch (error) {
+    console.error('Fetch clients error:', error);
+    res.status(500).json({ error: 'Failed to fetch clients' });
   }
 });
 
@@ -52,7 +68,6 @@ router.post('/', authenticate, authorizeEntity('users'), requireAdmin, async (re
       return res.status(400).json({ error: 'Email and password are required for application users' });
     }
 
-    // Ako je tip 'client', email i password nisu potrebni
     let hashedPassword = null;
     let accessCode = null;
     let userEmail = email || null;
@@ -74,7 +89,7 @@ router.post('/', authenticate, authorizeEntity('users'), requireAdmin, async (re
       [
         name, 
         userEmail, 
-        hashedPassword, 
+        hashedPassword,
         role || 'user', 
         type,
         phone || null,
@@ -122,7 +137,7 @@ router.put('/:id', authenticate, authorizeEntity('users'), async (req, res) => {
     const values = [];
 
     if (name) { updates.push('name = ?'); values.push(name); }
-    if (email) { updates.push('email = ?'); values.push(email); }
+    if (email !== undefined) { updates.push('email = ?'); values.push(email); }
     if (phone !== undefined) { updates.push('phone = ?'); values.push(phone); }
     if (role && req.user.role === 'admin') { updates.push('role = ?'); values.push(role); }
     if (type && req.user.role === 'admin') { updates.push('type = ?'); values.push(type); }
@@ -170,11 +185,15 @@ router.delete('/:id', authenticate, authorizeEntity('users'), requireAdmin, asyn
 
 router.post('/:id/reset-password', authenticate, authorizeEntity('users'), requireAdmin, async (req, res) => {
   try {
+    const [userRows] = await pool.execute('SELECT type FROM users WHERE id = ?', [req.params.id]);
+    if (userRows.length === 0) return res.status(404).json({ error: 'User not found' });
+    if (userRows[0].type === 'client') return res.status(400).json({ error: 'Cannot reset password for clients' });
+
     const newPassword = Math.random().toString(36).substring(2, 10);
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
     await pool.execute(
-      'UPDATE users SET password = ? WHERE id = ? AND type = "user"',
+      'UPDATE users SET password = ? WHERE id = ?',
       [hashedPassword, req.params.id]
     );
 
