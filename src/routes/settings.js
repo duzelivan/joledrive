@@ -34,10 +34,6 @@ router.put('/:key', authenticate, authorize(['settings.edit']), async (req, res)
   }
 });
 
-// ============================================
-// NOVO: Upravljanje emailovima za obavijesti
-// ============================================
-
 // Dohvati sve emailove za obavijesti
 router.get('/notification-emails', authenticate, async (req, res) => {
   try {
@@ -78,7 +74,7 @@ router.post('/notification-emails', authenticate, authorize(['settings.edit']), 
 
     // Provjeri jeli već dodan
     if (emails.includes(email)) {
-      return res.status(400). { error: 'Email already exists' });
+      return res.status(400).json({ error: 'Email already exists' });  // ← ISPRAVLJENO
     }
 
     emails.push(email);
