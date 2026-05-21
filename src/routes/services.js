@@ -126,13 +126,20 @@ router.put('/:id/complete', authenticate, async (req, res) => {
     await connection.beginTransaction();
 
     try {
-      // 1. Ažuriraj servis
+      // 1. Dohvati TRENUTNU kilometražu vozila prije ažuriranja
+      const [vehicleData] = await connection.execute(
+        'SELECT mileage FROM vehicles WHERE id = ?',
+        [vehicleId]
+      );
+      const previousMileage = vehicleData[0]?.mileage || 0;
+
+      // 2. Ažuriraj servis - spremi previous_mileage
       await connection.execute(
-        'UPDATE services SET status = ?, work_description = ?, labor_cost = ?, completed_at = NOW() WHERE id = ?',
-        ['completed', work_description, labor_cost, req.params.id]
+        'UPDATE services SET status = ?, work_description = ?, labor_cost = ?, completed_at = NOW(), previous_mileage = ? WHERE id = ?',
+        ['completed', work_description, labor_cost, previousMileage, req.params.id]
       );
 
-      // 2. Ažuriraj kilometražu vozila ako je poslana
+      // 3. Ažuriraj kilometražu vozila ako je poslana
       if (mileage && mileage > 0) {
         await connection.execute(
           'UPDATE vehicles SET mileage = ? WHERE id = ?',
@@ -140,7 +147,7 @@ router.put('/:id/complete', authenticate, async (req, res) => {
         );
       }
 
-      // 3. Dodaj dijelove i razduži skladište
+      // 4. Dodaj dijelove i razduži skladište
       if (parts_used && parts_used.length > 0) {
         for (const part of parts_used) {
           // Provjeri dostupnost
@@ -183,12 +190,67 @@ router.put('/:id/complete', authenticate, async (req, res) => {
   }
 });
 
-// Delete service
+// ============================================
+// NOVO: Delete service with rollback
+// ============================================
 router.delete('/:id', authenticate, authorize(['services.delete']), async (req, res) => {
+  const connection = await pool.getConnection();
+  
   try {
-    await pool.execute('DELETE FROM services WHERE id = ?', [req.params.id]);
-    res.json({ message: 'Service deleted successfully' });
+    await connection.beginTransaction();
+
+    // 1. Dohvati servis
+    const [serviceRows] = await connection.execute(
+      'SELECT * FROM services WHERE id = ?',
+      [req.params.id]
+    );
+    
+    if (serviceRows.length === 0) {
+      await connection.rollback();
+      connection.release();
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const service = serviceRows[0];
+
+    // 2. Dohvati dijelove korištene u servisu
+    const [partsUsed] = await connection.execute(
+      'SELECT part_id, quantity FROM service_parts WHERE service_id = ?',
+      [req.params.id]
+    );
+
+    // 3. Vrati dijelove na skladište
+    for (const part of partsUsed) {
+      await connection.execute(
+        'UPDATE warehouse SET quantity = quantity + ? WHERE id = ?',
+        [part.quantity, part.part_id]
+      );
+    }
+
+    // 4. Vrati kilometražu vozila (ako je servis bio završen i imao previous_mileage)
+    if (service.status === 'completed' && service.previous_mileage !== null) {
+      await connection.execute(
+        'UPDATE vehicles SET mileage = ? WHERE id = ?',
+        [service.previous_mileage, service.vehicle_id]
+      );
+    }
+
+    // 5. Obriši servis (service_parts se briše automatski CASCADE)
+    await connection.execute('DELETE FROM services WHERE id = ?', [req.params.id]);
+
+    await connection.commit();
+    connection.release();
+
+    res.json({ 
+      message: 'Service deleted successfully',
+      partsReturned: partsUsed.length,
+      mileageReverted: service.status === 'completed' && service.previous_mileage !== null
+    });
+
   } catch (error) {
+    await connection.rollback();
+    connection.release();
+    console.error('Delete service error:', error);
     res.status(500).json({ error: 'Failed to delete service' });
   }
 });
