@@ -17,6 +17,12 @@ app.use(cors({
   credentials: true
 }));
 
+// PRIVREMENO - za testiranje, obriši kasnije
+app.get('/test-notifications', async (req, res) => {
+  await sendDailyNotifications();
+  res.json({ message: 'Notifications sent' });
+});
+
 // Rate limiting — sada neće crashati
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
