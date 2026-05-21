@@ -79,6 +79,136 @@ cron.schedule('0 8 * * *', async () => {
   }
 });
 
+const cron = require('node-cron');
+const { sendEmail } = require('./utils/email');
+
+// Dohvati emailove za obavijesti iz postavki
+async function getNotificationEmails() {
+  const [rows] = await pool.execute(
+    'SELECT setting_value FROM settings WHERE setting_key = ?',
+    ['notification_emails']
+  );
+  if (rows.length === 0) return [];
+  return rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
+}
+
+// Provjeri i pošalji dnevne obavijesti
+async function sendDailyNotifications() {
+  try {
+    console.log('[' + new Date().toISOString() + '] Pokrećem dnevne obavijesti...');
+    
+    const today = new Date().toISOString().split('T')[0];
+    const thirtyDaysLater = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+    // Pronađi vozila s ističućim stvarima
+    const [vehicles] = await pool.execute(
+      `SELECT v.*, u.name as assigned_name
+       FROM vehicles v
+       LEFT JOIN users u ON v.assigned_to = u.id
+       WHERE registration_date <= ? OR yellow_card_date <= ? OR pp_apparatus_date <= ?`,
+      [thirtyDaysLater, thirtyDaysLater, thirtyDaysLater]
+    );
+
+    const notificationEmails = await getNotificationEmails();
+    if (notificationEmails.length === 0) {
+      console.log('Nema konfiguriranih emailova za obavijesti');
+      return;
+    }
+
+    let sent = 0;
+    let skipped = 0;
+
+    for (const vehicle of vehicles) {
+      // Provjeri jeli već poslano danas za ovo vozilo
+      const [existing] = await pool.execute(
+        `SELECT id FROM notification_logs WHERE vehicle_id = ? AND DATE(sent_at) = CURDATE()`,
+        [vehicle.id]
+      );
+      
+      if (existing.length > 0) {
+        skipped++;
+        continue;
+      }
+
+      let alerts = [];
+      const regDate = new Date(vehicle.registration_date);
+      const yellowDate = new Date(vehicle.yellow_card_date);
+      const ppDate = new Date(vehicle.pp_apparatus_date);
+      const now = new Date();
+
+      if (regDate <= now) alerts.push(`Registracija ISTEKLA (${vehicle.registration_date})`);
+      else if (regDate <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)) {
+        const days = Math.ceil((regDate - now) / (1000 * 60 * 60 * 24));
+        alerts.push(`Registracija ističe za ${days} dana`);
+      }
+
+      if (yellowDate <= now) alerts.push(`Žuti karton ISTEKAO (${vehicle.yellow_card_date})`);
+      else if (yellowDate <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)) {
+        const days = Math.ceil((yellowDate - now) / (1000 * 60 * 60 * 24));
+        alerts.push(`Žuti karton ističe za ${days} dana`);
+      }
+
+      if (ppDate <= now) alerts.push(`PP aparat ISTEKAO (${vehicle.pp_apparatus_date})`);
+      else if (ppDate <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)) {
+        const days = Math.ceil((ppDate - now) / (1000 * 60 * 60 * 24));
+        alerts.push(`PP aparat ističe za ${days} dana`);
+      }
+
+      if (alerts.length === 0) continue;
+
+      // POŠALJI EMAIL
+      const result = await sendEmail(
+        notificationEmails,
+        `JoleDrive - Obavijest za ${vehicle.manufacturer} ${vehicle.model}`,
+        `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #dc2626;">🔔 JoleDrive Obavijest</h2>
+            <p>Poštovani,</p>
+            <p>Sljedeće stavke zahtijevaju pažnju za vozilo:</p>
+            
+            <div style="background: #f3f4f6; padding: 16px; border-radius: 8px; margin: 16px 0;">
+              <h3 style="margin-top: 0; color: #1f2937;">
+                ${vehicle.manufacturer} ${vehicle.model}
+                <span style="color: #6b7280; font-size: 14px;">(${vehicle.license_plate || '---'})</span>
+              </h3>
+              ${vehicle.assigned_name ? `<p><strong>Zadužio:</strong> ${vehicle.assigned_name}</p>` : ''}
+              <ul style="color: #dc2626;">
+                ${alerts.map(a => `<li>${a}</li>`).join('')}
+              </ul>
+            </div>
+            
+            <p style="font-size: 12px; color: #6b7280; margin-top: 24px;">
+              JoleDrive d.o.o - Evidencija vozila<br>
+              Ova obavijest je automatski generirana.
+            </p>
+          </div>
+        `
+      );
+
+      if (result.success) {
+        sent++;
+        // Zabilježi da je poslano
+        await pool.execute(
+          'INSERT INTO notification_logs (vehicle_id, sent_at, alerts) VALUES (?, NOW(), ?)',
+          [vehicle.id, JSON.stringify(alerts)]
+        );
+      }
+    }
+
+    console.log(`[${new Date().toISOString()}] Završeno: ${sent} poslano, ${skipped} preskočeno`);
+
+  } catch (error) {
+    console.error('Greška u dnevnim obavijestima:', error);
+  }
+}
+
+// Pokreni svakog dana u 9:00 (po hrvatskom vremenu)
+cron.schedule('0 9 * * *', sendDailyNotifications, {
+  timezone: 'Europe/Zagreb'
+});
+
+console.log('Cron postavljen: Svakog dana u 9:00 šalje obavijesti');
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`JoleDrive API running on port ${PORT}`);
