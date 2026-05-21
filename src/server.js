@@ -17,13 +17,7 @@ app.use(cors({
   credentials: true
 }));
 
-// PRIVREMENO - za testiranje, obriši kasnije
-app.get('/test-notifications', async (req, res) => {
-  await sendDailyNotifications();
-  res.json({ message: 'Notifications sent' });
-});
-
-// Rate limiting — sada neće crashati
+// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -52,8 +46,8 @@ app.use('/api/services', require('./routes/services'));
 app.use('/api/invoices', require('./routes/invoices'));
 app.use('/api/warehouse', require('./routes/warehouse'));
 app.use('/api/dashboard', require('./routes/dashboard'));
-app.use('/api/notifications', require('./routes/notifications')); // NOVO - email obavijesti
-app.use('/api/settings', require('./routes/settings')); // NOVO - postavke aplikacije
+app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/settings', require('./routes/settings'));
 
 // Error handling
 app.use((err, req, res, next) => {
@@ -61,34 +55,11 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Automatski cron job - svaki dan u 8:00
-cron.schedule('0 8 * * *', async () => {
-  console.log('Running daily email reminders...');
-  try {
-    // Interni API poziv za slanje obavijesti
-    const response = await fetch(`http://localhost:${process.env.PORT || 5000}/api/notifications/send-reminders`, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.INTERNAL_API_TOKEN || 'dev-token'}`
-      }
-    });
-    
-    if (response.ok) {
-      const result = await response.json();
-      console.log('Daily reminders result:', result.message);
-    } else {
-      console.error('Daily reminders failed:', response.status);
-    }
-  } catch (error) {
-    console.error('Cron job error:', error.message);
-  }
-});
-
-const cron = require('node-cron');
+// ============================================
+// CRON - Automatske dnevne obavijesti
+// ============================================
 const { sendEmail } = require('./utils/email');
 
-// Dohvati emailove za obavijesti iz postavki
 async function getNotificationEmails() {
   const [rows] = await pool.execute(
     'SELECT setting_value FROM settings WHERE setting_key = ?',
@@ -98,7 +69,6 @@ async function getNotificationEmails() {
   return rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
 }
 
-// Provjeri i pošalji dnevne obavijesti
 async function sendDailyNotifications() {
   try {
     console.log('[' + new Date().toISOString() + '] Pokrećem dnevne obavijesti...');
@@ -106,7 +76,6 @@ async function sendDailyNotifications() {
     const today = new Date().toISOString().split('T')[0];
     const thirtyDaysLater = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    // Pronađi vozila s ističućim stvarima
     const [vehicles] = await pool.execute(
       `SELECT v.*, u.name as assigned_name
        FROM vehicles v
@@ -125,7 +94,6 @@ async function sendDailyNotifications() {
     let skipped = 0;
 
     for (const vehicle of vehicles) {
-      // Provjeri jeli već poslano danas za ovo vozilo
       const [existing] = await pool.execute(
         `SELECT id FROM notification_logs WHERE vehicle_id = ? AND DATE(sent_at) = CURDATE()`,
         [vehicle.id]
@@ -162,7 +130,6 @@ async function sendDailyNotifications() {
 
       if (alerts.length === 0) continue;
 
-      // POŠALJI EMAIL
       const result = await sendEmail(
         notificationEmails,
         `JoleDrive - Obavijest za ${vehicle.manufacturer} ${vehicle.model}`,
@@ -193,7 +160,6 @@ async function sendDailyNotifications() {
 
       if (result.success) {
         sent++;
-        // Zabilježi da je poslano
         await pool.execute(
           'INSERT INTO notification_logs (vehicle_id, sent_at, alerts) VALUES (?, NOW(), ?)',
           [vehicle.id, JSON.stringify(alerts)]
@@ -208,13 +174,16 @@ async function sendDailyNotifications() {
   }
 }
 
-// Pokreni svakog dana u 9:00 (po hrvatskom vremenu)
+// Pokreni svakog dana u 9:00
 cron.schedule('0 9 * * *', sendDailyNotifications, {
   timezone: 'Europe/Zagreb'
 });
 
 console.log('Cron postavljen: Svakog dana u 9:00 šalje obavijesti');
 
+// ============================================
+// START SERVER
+// ============================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`JoleDrive API running on port ${PORT}`);
