@@ -2,10 +2,9 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const pool = require('../config/database');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-// Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, 'uploads/documents/');
@@ -21,8 +20,7 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 }
 });
 
-// Get all documents
-router.get('/', authenticate, async (req, res) => {
+router.get('/', authenticate, authorizeEntity('documents'), async (req, res) => {
   try {
     const { search, type, vehicle_id, sort_by } = req.query;
     let query = `SELECT d.*, v.manufacturer, v.model, v.license_plate, u.name as user_name 
@@ -54,8 +52,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// Create document (bez uploada, samo zapis u bazu)
-router.post('/', authenticate, authorize(['documents.create']), async (req, res) => {
+router.post('/', authenticate, authorizeEntity('documents'), authorize(['documents.create']), async (req, res) => {
   try {
     const { title, description, document_type, file_path, file_size, file_type, vehicle_id, user_id } = req.body;
 
@@ -71,9 +68,7 @@ router.post('/', authenticate, authorize(['documents.create']), async (req, res)
   }
 });
 
-
-// Delete document
-router.delete('/:id', authenticate, authorize(['documents.delete']), async (req, res) => {
+router.delete('/:id', authenticate, authorizeEntity('documents'), authorize(['documents.delete']), async (req, res) => {
   try {
     const [docs] = await pool.execute('SELECT file_path FROM documents WHERE id = ?', [req.params.id]);
     if (docs.length > 0 && docs[0].file_path) {
