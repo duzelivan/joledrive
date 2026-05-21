@@ -1,14 +1,13 @@
 const express = require('express');
 const pool = require('../config/database');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-router.get('/', authenticate, async (req, res) => {
+router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
     const thirtyDaysLater = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    // Notifications - with license_plate
     const [notifications] = await pool.execute(
       `SELECT id, manufacturer, model, license_plate, registration_date, yellow_card_date, pp_apparatus_date,
         CASE 
@@ -24,7 +23,6 @@ router.get('/', authenticate, async (req, res) => {
       [today, thirtyDaysLater, today, thirtyDaysLater, today, thirtyDaysLater, thirtyDaysLater, thirtyDaysLater, thirtyDaysLater]
     );
 
-    // Upcoming services
     const [upcomingServices] = await pool.execute(
       `SELECT s.*, v.manufacturer, v.model 
        FROM services s 
@@ -36,9 +34,6 @@ router.get('/', authenticate, async (req, res) => {
       [today]
     );
 
-    // === RAČUNI - tri zasebna upita ===
-
-    // 1. Neplaćeni (bez uplata)
     const [unpaidResult] = await pool.execute(`
       SELECT i.id, i.amount 
       FROM invoices i
@@ -49,7 +44,6 @@ router.get('/', authenticate, async (req, res) => {
     let unpaidCount = unpaidResult.length;
     let unpaidTotal = unpaidResult.reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0);
 
-    // 2. Djelomično plaćeni
     const [partialResult] = await pool.execute(`
       SELECT i.id, i.amount, SUM(p.amount) as paid
       FROM invoices i
@@ -61,7 +55,6 @@ router.get('/', authenticate, async (req, res) => {
     let partialCount = partialResult.length;
     let partialTotal = partialResult.reduce((sum, inv) => sum + ((Number(inv.amount) || 0) - (Number(inv.paid) || 0)), 0);
 
-    // 3. Plaćeni
     const [paidResult] = await pool.execute(`
       SELECT i.id, i.amount
       FROM invoices i
@@ -75,7 +68,6 @@ router.get('/', authenticate, async (req, res) => {
 
     const totalDue = unpaidTotal + partialTotal;
 
-    // Stats
     const [[vehicleCount]] = await pool.execute('SELECT COUNT(*) as count FROM vehicles');
     const [[serviceCount]] = await pool.execute('SELECT COUNT(*) as count FROM services WHERE status = "completed"');
 
@@ -100,8 +92,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// Analytics - Income and expenses
-router.get('/analytics', authenticate, async (req, res) => {
+router.get('/analytics', authenticate, authorizeEntity('dashboard'), async (req, res) => {
   try {
     const { period, year, month, week } = req.query;
 
