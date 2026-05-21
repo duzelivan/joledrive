@@ -136,6 +136,7 @@ router.post('/:id/payments', authenticate, authorizeEntity('invoices'), authoriz
 
     const invoice = invoiceRows[0];
     const totalAmount = parseFloat(invoice.amount);
+    const vehicleId = invoice.vehicle_id;
     
     const [paymentSum] = await pool.execute(
       'SELECT COALESCE(SUM(amount), 0) as total_paid FROM invoice_payments WHERE invoice_id = ?',
@@ -164,6 +165,19 @@ router.post('/:id/payments', authenticate, authorizeEntity('invoices'), authoriz
       'UPDATE invoices SET status = ? WHERE id = ?',
       [newStatus, invoiceId]
     );
+
+    // NOVO: Ažuriraj vehicle income ako je plaćen račun
+    if (newStatus === 'paid' && vehicleId) {
+      const [[vehicle]] = await pool.execute(
+        'SELECT total_income, total_expenses FROM vehicles WHERE id = ?',
+        [vehicleId]
+      );
+      const newIncome = (vehicle?.total_income || 0) + parseFloat(amount);
+      await pool.execute(
+        `UPDATE vehicles SET total_income = ?, total_profit = ? - total_expenses WHERE id = ?`,
+        [newIncome, newIncome, vehicleId]
+      );
+    }
 
     res.json({ 
       message: newStatus === 'paid' ? 'Invoice fully paid' : 'Partial payment recorded',
