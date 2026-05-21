@@ -6,7 +6,6 @@ const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 
-// Helper za sigurno parsiranje permissions
 const safeParsePermissions = (permissions) => {
   if (!permissions) return {}
   if (typeof permissions === 'string') {
@@ -35,6 +34,12 @@ router.post('/login', async (req, res) => {
     }
 
     const user = users[0];
+
+    // NOVO: Clienti se ne mogu prijaviti
+    if (user.type === 'client') {
+      return res.status(403).json({ error: 'Clients cannot login to the application' });
+    }
+
     const validPassword = await bcrypt.compare(password, user.password);
 
     if (!validPassword) {
@@ -66,18 +71,18 @@ router.post('/login', async (req, res) => {
       { expiresIn: '8h' }
     );
 
-res.json({
-  token,
-  user: {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    permissions: safeParsePermissions(user.permissions),
-    entities: safeParsePermissions(user.entities) // NOVO
-  }
-});
-    
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        type: user.type,
+        permissions: safeParsePermissions(user.permissions),
+        entities: safeParsePermissions(user.entities)
+      }
+    });
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
@@ -111,17 +116,17 @@ router.post('/setup-2fa', authenticate, async (req, res) => {
 // Verify session
 router.get('/me', authenticate, async (req, res) => {
   try {
-res.json({
-  user: {
-    id: req.user.id,
-    name: req.user.name,
-    email: req.user.email,
-    role: req.user.role,
-    permissions: safeParsePermissions(req.user.permissions),
-    entities: safeParsePermissions(req.user.entities) // NOVO
-  }
-});
-    
+    res.json({
+      user: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        role: req.user.role,
+        type: req.user.type,
+        permissions: safeParsePermissions(req.user.permissions),
+        entities: safeParsePermissions(req.user.entities)
+      }
+    })
   } catch (error) {
     console.error('Auth /me error:', error)
     res.status(500).json({ error: 'Failed to get user data' })
