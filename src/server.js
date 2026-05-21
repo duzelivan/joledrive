@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
+const pool = require('./config/database');
 require('dotenv').config();
 
 const app = express();
@@ -48,12 +49,6 @@ app.use('/api/warehouse', require('./routes/warehouse'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/settings', require('./routes/settings'));
-
-// Error handling
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: 'Internal server error' });
-});
 
 // ============================================
 // CRON - Automatske dnevne obavijesti
@@ -174,12 +169,30 @@ async function sendDailyNotifications() {
   }
 }
 
+// TEST ENDPOINT - ručno pokreni obavijesti
+app.get('/test-notifications', async (req, res) => {
+  try {
+    console.log('Test notifications triggered manually');
+    await sendDailyNotifications();
+    res.json({ success: true, message: 'Notifications sent - check logs' });
+  } catch (error) {
+    console.error('Test error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Pokreni svakog dana u 9:00
 cron.schedule('0 9 * * *', sendDailyNotifications, {
   timezone: 'Europe/Zagreb'
 });
 
 console.log('Cron postavljen: Svakog dana u 9:00 šalje obavijesti');
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
 // ============================================
 // START SERVER
