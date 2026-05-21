@@ -1,9 +1,8 @@
 const express = require('express');
 const pool = require('../config/database');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-// Helper: izračunaj paid/remaining za jedan ili više računa
 async function enrichInvoiceWithPayments(invoice) {
   if (!invoice) return null;
   
@@ -16,7 +15,6 @@ async function enrichInvoiceWithPayments(invoice) {
   const total = parseFloat(invoice.amount);
   const remaining = total - paid;
   
-  // Odredi status na temelju uplata
   let computedStatus = invoice.status;
   if (paid >= total) computedStatus = 'paid';
   else if (paid > 0) computedStatus = 'partial';
@@ -26,12 +24,11 @@ async function enrichInvoiceWithPayments(invoice) {
     ...invoice,
     paid_amount: paid,
     remaining_amount: remaining,
-    status: computedStatus // override s izračunatim statusom
+    status: computedStatus
   };
 }
 
-// Get all invoices with vehicle info + payment summary
-router.get('/', authenticate, async (req, res) => {
+router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
     const { status, vehicle_id, search } = req.query;
     let query = `SELECT i.*, v.manufacturer, v.model, v.license_plate 
@@ -53,12 +50,10 @@ router.get('/', authenticate, async (req, res) => {
 
     const [invoices] = await pool.execute(query, params);
     
-    // Enrich svaki račun s podacima o plaćanju
     const enrichedInvoices = await Promise.all(
       invoices.map(inv => enrichInvoiceWithPayments(inv))
     );
     
-    // Filtriraj po statusu ako je zatraženo
     let result = enrichedInvoices;
     if (status) {
       result = result.filter(inv => inv.status === status);
@@ -71,8 +66,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// Get single invoice with payment history
-router.get('/:id', authenticate, async (req, res) => {
+router.get('/:id', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
     const [invoiceRows] = await pool.execute(
       `SELECT i.*, v.manufacturer, v.model, v.license_plate
@@ -103,8 +97,7 @@ router.get('/:id', authenticate, async (req, res) => {
   }
 });
 
-// Create invoice
-router.post('/', authenticate, authorize(['invoices.create']), async (req, res) => {
+router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices.create']), async (req, res) => {
   try {
     const {
       invoice_number, description, amount, vehicle_id, user_id,
@@ -128,13 +121,11 @@ router.post('/', authenticate, authorize(['invoices.create']), async (req, res) 
   }
 });
 
-// Add partial payment
-router.post('/:id/payments', authenticate, authorize(['invoices.edit']), async (req, res) => {
+router.post('/:id/payments', authenticate, authorizeEntity('invoices'), authorize(['invoices.edit']), async (req, res) => {
   try {
     const { amount, payment_date, payment_method, notes } = req.body;
     const invoiceId = req.params.id;
 
-    // Dohvati račun
     const [invoiceRows] = await pool.execute(
       'SELECT * FROM invoices WHERE id = ?', [invoiceId]
     );
@@ -146,7 +137,6 @@ router.post('/:id/payments', authenticate, authorize(['invoices.edit']), async (
     const invoice = invoiceRows[0];
     const totalAmount = parseFloat(invoice.amount);
     
-    // Dohvati ukupno plaćeno do sada
     const [paymentSum] = await pool.execute(
       'SELECT COALESCE(SUM(amount), 0) as total_paid FROM invoice_payments WHERE invoice_id = ?',
       [invoiceId]
@@ -154,21 +144,18 @@ router.post('/:id/payments', authenticate, authorize(['invoices.edit']), async (
     const currentlyPaid = parseFloat(paymentSum[0].total_paid);
     const newPaid = currentlyPaid + parseFloat(amount);
 
-    // Validacija
     if (newPaid > totalAmount) {
       return res.status(400).json({ 
         error: `Payment exceeds remaining amount. Remaining: ${(totalAmount - currentlyPaid).toFixed(2)} €` 
       });
     }
 
-    // Zabilježi uplatu
     await pool.execute(
       `INSERT INTO invoice_payments (invoice_id, amount, payment_date, payment_method, notes) 
        VALUES (?, ?, ?, ?, ?)`,
       [invoiceId, amount, payment_date || new Date(), payment_method || 'transfer', notes || null]
     );
 
-    // Ažuriraj status računa
     let newStatus = 'partial';
     if (newPaid >= totalAmount) newStatus = 'paid';
     else if (newPaid <= 0) newStatus = 'unpaid';
@@ -190,72 +177,4 @@ router.post('/:id/payments', authenticate, authorize(['invoices.edit']), async (
   }
 });
 
-// Mark as fully paid (stara ruta, sada koristi payments)
-router.put('/:id/pay', authenticate, authorize(['invoices.edit']), async (req, res) => {
-  try {
-    const invoiceId = req.params.id;
-    
-    const [invoiceRows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
-    if (invoiceRows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
-    
-    const invoice = invoiceRows[0];
-    const totalAmount = parseFloat(invoice.amount);
-    
-    // Dohvati trenutno plaćeno
-    const [paymentSum] = await pool.execute(
-      'SELECT COALESCE(SUM(amount), 0) as total_paid FROM invoice_payments WHERE invoice_id = ?',
-      [invoiceId]
-    );
-    const currentlyPaid = parseFloat(paymentSum[0].total_paid);
-
-    // Ako nema uplata, zabilježi punu uplatu
-    if (currentlyPaid === 0) {
-      await pool.execute(
-        `INSERT INTO invoice_payments (invoice_id, amount, payment_date, payment_method, notes) 
-         VALUES (?, ?, NOW(), 'transfer', 'Full payment')`,
-        [invoiceId, totalAmount]
-      );
-    }
-
-    // Ažuriraj status
-    await pool.execute(
-      'UPDATE invoices SET status = ?, paid_at = NOW() WHERE id = ?',
-      ['paid', invoiceId]
-    );
-
-    res.json({ message: 'Invoice marked as fully paid' });
-  } catch (error) {
-    console.error('Full pay error:', error);
-    res.status(500).json({ error: 'Failed to update invoice' });
-  }
-});
-
-// Update invoice (osnovni podaci)
-router.put('/:id', authenticate, authorize(['invoices.edit']), async (req, res) => {
-  try {
-    const { invoice_number, description, amount, due_date, status } = req.body;
-    
-    await pool.execute(
-      'UPDATE invoices SET invoice_number = ?, description = ?, amount = ?, due_date = ?, status = ? WHERE id = ?',
-      [invoice_number, description, amount, due_date, status, req.params.id]
-    );
-    res.json({ message: 'Invoice updated successfully' });
-  } catch (error) {
-    console.error('Update error:', error);
-    res.status(500).json({ error: 'Failed to update invoice' });
-  }
-});
-
-// Delete invoice
-router.delete('/:id', authenticate, authorize(['invoices.delete']), async (req, res) => {
-  try {
-    // Payments će se obrisati automatski zbog ON DELETE CASCADE
-    await pool.execute('DELETE FROM invoices WHERE id = ?', [req.params.id]);
-    res.json({ message: 'Invoice deleted successfully' });
-  } catch (error) {
-    console.error('Delete error:', error);
-    res.status(500).json({ error: 'Failed to delete invoice' });
-  }
-});
-
-module.exports = router;
+router.put('/:id/pay', authenticate, authorizeEntity('invoices'),
