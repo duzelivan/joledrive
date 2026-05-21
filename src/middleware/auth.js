@@ -10,7 +10,7 @@ const authenticate = async (req, res, next) => {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const [users] = await pool.execute(
-      'SELECT id, email, name, role, permissions FROM users WHERE id = ?',
+      'SELECT id, email, name, role, permissions, entities FROM users WHERE id = ?',
       [decoded.id]
     );
 
@@ -29,11 +29,28 @@ const authorize = (permissions) => {
   return (req, res, next) => {
     if (req.user.role === 'admin') return next();
 
-    const userPerms = JSON.parse(req.user.permissions || '{}');
+    const userPerms = safeParse(req.user.permissions);
     const hasPermission = permissions.every(p => userPerms[p] === true);
 
     if (!hasPermission) {
       return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    next();
+  };
+};
+
+// NOVO: Provjera pristupa entitetu (modulu)
+const authorizeEntity = (entity) => {
+  return (req, res, next) => {
+    if (req.user.role === 'admin') return next();
+
+    const userEntities = safeParse(req.user.entities);
+    
+    // Ako nema definiranih entities, dopusti sve (backwards compatibility)
+    if (!userEntities || Object.keys(userEntities).length === 0) return next();
+
+    if (userEntities[entity] !== true) {
+      return res.status(403).json({ error: `Access denied to ${entity}` });
     }
     next();
   };
@@ -46,4 +63,12 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-module.exports = { authenticate, authorize, requireAdmin };
+// Helper za sigurno parsiranje
+function safeParse(json) {
+  if (!json) return {};
+  if (typeof json === 'object') return json;
+  try { return JSON.parse(json); } 
+  catch (e) { return {}; }
+}
+
+module.exports = { authenticate, authorize, authorizeEntity, requireAdmin };
