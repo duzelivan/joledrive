@@ -1,27 +1,23 @@
 const express = require('express');
 const pool = require('../config/database');
 const { sendEmail } = require('../utils/email');
+const { authenticate, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-// Dohvati emailove za obavijesti iz postavki
 async function getNotificationEmails() {
   const [rows] = await pool.execute(
     'SELECT setting_value FROM settings WHERE setting_key = ?',
     ['notification_emails']
   );
   if (rows.length === 0) return [];
-  
-  // Može biti više emailova odvojenih zarezom
   return rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
 }
 
-// Manualno pošalji podsjetnike (admin)
-router.post('/send-reminders', async (req, res) => {
+router.post('/send-reminders', authenticate, authorizeEntity('settings'), async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
     const sevenDaysLater = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    // Pronađi vozila kojima nešto ističe za 7 dana ili je već isteklo
     const [vehicles] = await pool.execute(`
       SELECT v.*, u.name as assigned_name
       FROM vehicles v
@@ -48,7 +44,6 @@ router.post('/send-reminders', async (req, res) => {
     const errors = [];
 
     for (const vehicle of vehicles) {
-      // Odredi što ističe
       let alerts = [];
       const regDate = new Date(vehicle.registration_date);
       const yellowDate = new Date(vehicle.yellow_card_date);
@@ -110,10 +105,8 @@ router.post('/send-reminders', async (req, res) => {
   }
 });
 
-// Automatski dnevni podsjetnik (poziva se iz cron-a)
 router.post('/daily-check', async (req, res) => {
   try {
-    // Provjeri jeli zahtjev dolazi iz internog cron-a
     const cronSecret = req.headers['x-cron-secret'];
     if (cronSecret !== process.env.CRON_SECRET) {
       return res.status(401).json({ error: 'Unauthorized' });
