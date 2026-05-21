@@ -66,16 +66,18 @@ router.post('/login', async (req, res) => {
       { expiresIn: '8h' }
     );
 
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        permissions: safeParsePermissions(user.permissions)
-      }
-    });
+res.json({
+  token,
+  user: {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    permissions: safeParsePermissions(user.permissions),
+    entities: safeParsePermissions(user.entities) // NOVO
+  }
+});
+    
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
@@ -109,15 +111,17 @@ router.post('/setup-2fa', authenticate, async (req, res) => {
 // Verify session
 router.get('/me', authenticate, async (req, res) => {
   try {
-    res.json({
-      user: {
-        id: req.user.id,
-        name: req.user.name,
-        email: req.user.email,
-        role: req.user.role,
-        permissions: safeParsePermissions(req.user.permissions)
-      }
-    })
+res.json({
+  user: {
+    id: req.user.id,
+    name: req.user.name,
+    email: req.user.email,
+    role: req.user.role,
+    permissions: safeParsePermissions(req.user.permissions),
+    entities: safeParsePermissions(req.user.entities) // NOVO
+  }
+});
+    
   } catch (error) {
     console.error('Auth /me error:', error)
     res.status(500).json({ error: 'Failed to get user data' })
