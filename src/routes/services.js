@@ -1,10 +1,9 @@
 const express = require('express');
 const pool = require('../config/database');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-// Get all services
-router.get('/', authenticate, async (req, res) => {
+router.get('/', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const { status, vehicle_id, mechanic_id } = req.query;
     let query = `SELECT s.*, v.manufacturer, v.model, v.chassis_number, u.name as mechanic_name 
@@ -36,8 +35,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// Get single service with parts used
-router.get('/:id', authenticate, async (req, res) => {
+router.get('/:id', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const [services] = await pool.execute(
       `SELECT s.*, v.manufacturer, v.model, u.name as mechanic_name 
@@ -52,7 +50,6 @@ router.get('/:id', authenticate, async (req, res) => {
 
     const service = services[0];
 
-    // Get parts used
     const [parts] = await pool.execute(
       `SELECT sp.*, p.name as part_name, p.part_number 
        FROM service_parts sp 
@@ -68,8 +65,7 @@ router.get('/:id', authenticate, async (req, res) => {
   }
 });
 
-// Create service (schedule appointment)
-router.post('/', authenticate, authorize(['services.create']), async (req, res) => {
+router.post('/', authenticate, authorizeEntity('services'), authorize(['services.create']), async (req, res) => {
   try {
     const { vehicle_id, service_type, description, service_date, estimated_cost } = req.body;
 
@@ -85,10 +81,8 @@ router.post('/', authenticate, authorize(['services.create']), async (req, res) 
   }
 });
 
-// Confirm service (mechanic)
-router.put('/:id/confirm', authenticate, async (req, res) => {
+router.put('/:id/confirm', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
-    // Check if user is mechanic or admin
     if (req.user.role !== 'admin' && req.user.role !== 'mechanic') {
       return res.status(403).json({ error: 'Only mechanics can confirm services' });
     }
@@ -104,12 +98,10 @@ router.put('/:id/confirm', authenticate, async (req, res) => {
   }
 });
 
-// Complete service
-router.put('/:id/complete', authenticate, async (req, res) => {
+router.put('/:id/complete', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const { work_description, labor_cost, mileage, parts_used } = req.body;
 
-    // Dohvati vehicle_id za ažuriranje kilometraže
     const [serviceData] = await pool.execute(
       'SELECT vehicle_id FROM services WHERE id = ?',
       [req.params.id]
@@ -121,25 +113,21 @@ router.put('/:id/complete', authenticate, async (req, res) => {
 
     const vehicleId = serviceData[0].vehicle_id;
 
-    // Započni transakciju
     const connection = await pool.getConnection();
     await connection.beginTransaction();
 
     try {
-      // 1. Dohvati TRENUTNU kilometražu vozila prije ažuriranja
       const [vehicleData] = await connection.execute(
         'SELECT mileage FROM vehicles WHERE id = ?',
         [vehicleId]
       );
       const previousMileage = vehicleData[0]?.mileage || 0;
 
-      // 2. Ažuriraj servis - spremi previous_mileage
       await connection.execute(
         'UPDATE services SET status = ?, work_description = ?, labor_cost = ?, completed_at = NOW(), previous_mileage = ? WHERE id = ?',
         ['completed', work_description, labor_cost, previousMileage, req.params.id]
       );
 
-      // 3. Ažuriraj kilometražu vozila ako je poslana
       if (mileage && mileage > 0) {
         await connection.execute(
           'UPDATE vehicles SET mileage = ? WHERE id = ?',
@@ -147,10 +135,8 @@ router.put('/:id/complete', authenticate, async (req, res) => {
         );
       }
 
-      // 4. Dodaj dijelove i razduži skladište
       if (parts_used && parts_used.length > 0) {
         for (const part of parts_used) {
-          // Provjeri dostupnost
           const [stock] = await connection.execute(
             'SELECT quantity FROM warehouse WHERE id = ?',
             [part.part_id]
@@ -160,13 +146,11 @@ router.put('/:id/complete', authenticate, async (req, res) => {
             throw new Error(`Nedovoljna zaliha za dio: ${part.name}`);
           }
 
-          // Dodaj u service_parts
           await connection.execute(
             'INSERT INTO service_parts (service_id, part_id, quantity, unit_price) VALUES (?, ?, ?, ?)',
             [req.params.id, part.part_id, part.quantity, part.unit_price]
           );
 
-          // Razduži skladište
           await connection.execute(
             'UPDATE warehouse SET quantity = quantity - ? WHERE id = ?',
             [part.quantity, part.part_id]
@@ -190,16 +174,12 @@ router.put('/:id/complete', authenticate, async (req, res) => {
   }
 });
 
-// ============================================
-// NOVO: Delete service with rollback
-// ============================================
-router.delete('/:id', authenticate, authorize(['services.delete']), async (req, res) => {
+router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['services.delete']), async (req, res) => {
   const connection = await pool.getConnection();
   
   try {
     await connection.beginTransaction();
 
-    // 1. Dohvati servis
     const [serviceRows] = await connection.execute(
       'SELECT * FROM services WHERE id = ?',
       [req.params.id]
@@ -213,13 +193,11 @@ router.delete('/:id', authenticate, authorize(['services.delete']), async (req, 
 
     const service = serviceRows[0];
 
-    // 2. Dohvati dijelove korištene u servisu
     const [partsUsed] = await connection.execute(
       'SELECT part_id, quantity FROM service_parts WHERE service_id = ?',
       [req.params.id]
     );
 
-    // 3. Vrati dijelove na skladište
     for (const part of partsUsed) {
       await connection.execute(
         'UPDATE warehouse SET quantity = quantity + ? WHERE id = ?',
@@ -227,7 +205,6 @@ router.delete('/:id', authenticate, authorize(['services.delete']), async (req, 
       );
     }
 
-    // 4. Vrati kilometražu vozila (ako je servis bio završen i imao previous_mileage)
     if (service.status === 'completed' && service.previous_mileage !== null) {
       await connection.execute(
         'UPDATE vehicles SET mileage = ? WHERE id = ?',
@@ -235,7 +212,6 @@ router.delete('/:id', authenticate, authorize(['services.delete']), async (req, 
       );
     }
 
-    // 5. Obriši servis (service_parts se briše automatski CASCADE)
     await connection.execute('DELETE FROM services WHERE id = ?', [req.params.id]);
 
     await connection.commit();
