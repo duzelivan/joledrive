@@ -1,10 +1,9 @@
 const express = require('express');
 const pool = require('../config/database');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-// Get all parts
-router.get('/', authenticate, async (req, res) => {
+router.get('/', authenticate, authorizeEntity('warehouse'), async (req, res) => {
   try {
     const { search, low_stock } = req.query;
     let query = 'SELECT * FROM warehouse WHERE 1=1';
@@ -27,8 +26,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// Get single part
-router.get('/:id', authenticate, async (req, res) => {
+router.get('/:id', authenticate, authorizeEntity('warehouse'), async (req, res) => {
   try {
     const [parts] = await pool.execute('SELECT * FROM warehouse WHERE id = ?', [req.params.id]);
     if (parts.length === 0) return res.status(404).json({ error: 'Part not found' });
@@ -38,8 +36,7 @@ router.get('/:id', authenticate, async (req, res) => {
   }
 });
 
-// Create part
-router.post('/', authenticate, authorize(['warehouse.create']), async (req, res) => {
+router.post('/', authenticate, authorizeEntity('warehouse'), authorize(['warehouse.create']), async (req, res) => {
   try {
     const { name, part_number, category, quantity, min_quantity, unit_price, supplier, notes } = req.body;
 
@@ -55,8 +52,7 @@ router.post('/', authenticate, authorize(['warehouse.create']), async (req, res)
   }
 });
 
-// Update part
-router.put('/:id', authenticate, authorize(['warehouse.edit']), async (req, res) => {
+router.put('/:id', authenticate, authorizeEntity('warehouse'), authorize(['warehouse.edit']), async (req, res) => {
   try {
     const { name, part_number, category, quantity, min_quantity, unit_price, supplier, notes } = req.body;
     await pool.execute(
@@ -70,8 +66,7 @@ router.put('/:id', authenticate, authorize(['warehouse.edit']), async (req, res)
   }
 });
 
-// Delete part
-router.delete('/:id', authenticate, authorize(['warehouse.delete']), async (req, res) => {
+router.delete('/:id', authenticate, authorizeEntity('warehouse'), authorize(['warehouse.delete']), async (req, res) => {
   try {
     await pool.execute('DELETE FROM warehouse WHERE id = ?', [req.params.id]);
     res.json({ message: 'Part deleted successfully' });
