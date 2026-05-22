@@ -158,6 +158,15 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
         }
       }
 
+      // NOVO: Ažuriraj profit vozila
+      await connection.execute(
+        `UPDATE vehicles 
+         SET total_expenses = total_expenses + ?,
+             total_profit = total_income - (total_expenses + ?)
+         WHERE id = ?`,
+        [labor_cost, labor_cost, vehicleId]
+      );
+
       await connection.commit();
       res.json({ message: 'Service completed successfully' });
 
@@ -209,6 +218,17 @@ router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['ser
       await connection.execute(
         'UPDATE vehicles SET mileage = ? WHERE id = ?',
         [service.previous_mileage, service.vehicle_id]
+      );
+    }
+
+    // NOVO: Vrati profit ako je servis bio završen
+    if (service.status === 'completed') {
+      await connection.execute(
+        `UPDATE vehicles 
+         SET total_expenses = total_expenses - ?,
+             total_profit = total_income - (total_expenses - ?)
+         WHERE id = ?`,
+        [service.labor_cost, service.labor_cost, service.vehicle_id]
       );
     }
 
