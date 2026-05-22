@@ -70,6 +70,74 @@ router.get('/:id', authenticate, authorizeEntity('services'), async (req, res) =
   }
 });
 
+// NOVO: Plaćanje prema mehaničaru (bez servisa)
+router.post('/mechanic-payments/by-mechanic', authenticate, authorize(['admin']), async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+
+    const { mechanic_id, amount, payment_date, note } = req.body;
+
+    // Provjeri mehaničara
+    const [mechanicRows] = await connection.execute(
+      'SELECT id, name FROM users WHERE id = ? AND role = ?',
+      [mechanic_id, 'mechanic']
+    );
+
+    if (mechanicRows.length === 0) {
+      await connection.rollback();
+      connection.release();
+      return res.status(404).json({ error: 'Mechanic not found' });
+    }
+
+    // Provjeri dugovanje
+    const [debtResult] = await connection.execute(
+      `SELECT 
+        COALESCE(SUM(labor_cost), 0) as total_labor,
+        (SELECT COALESCE(SUM(amount), 0) FROM mechanic_payments WHERE mechanic_id = ?) as total_paid
+       FROM services 
+       WHERE mechanic_id = ? AND status = 'completed'`,
+      [mechanic_id, mechanic_id]
+    );
+
+    const totalLabor = parseFloat(debtResult[0].total_labor);
+    const totalPaid = parseFloat(debtResult[0].total_paid);
+    const remainingDebt = totalLabor - totalPaid;
+
+    if (parseFloat(amount) > remainingDebt) {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({ 
+        error: `Payment exceeds debt. Current debt: €${remainingDebt.toFixed(2)}` 
+      });
+    }
+
+    // Umetni plaćanje bez service_id (NULL)
+    const [result] = await connection.execute(
+      `INSERT INTO mechanic_payments (mechanic_id, service_id, amount, payment_date, note, created_by) 
+       VALUES (?, NULL, ?, ?, ?, ?)`,
+      [mechanic_id, amount, payment_date || new Date(), note || null, req.user.id]
+    );
+
+    await connection.commit();
+    connection.release();
+
+    res.json({ 
+      id: result.insertId,
+      message: 'Payment recorded successfully',
+      amount: parseFloat(amount),
+      remaining_debt: remainingDebt - parseFloat(amount)
+    });
+
+  } catch (error) {
+    await connection.rollback();
+    connection.release();
+    console.error('Mechanic payment error:', error);
+    res.status(500).json({ error: 'Failed to record payment' });
+  }
+});
+
 router.post('/', authenticate, authorizeEntity('services'), authorize(['services.create']), async (req, res) => {
   try {
     const { vehicle_id, service_type, description, service_date, estimated_cost } = req.body;
