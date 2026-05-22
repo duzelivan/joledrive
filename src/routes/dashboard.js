@@ -71,21 +71,13 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
     const [[vehicleCount]] = await pool.execute('SELECT COUNT(*) as count FROM vehicles');
     const [[serviceCount]] = await pool.execute('SELECT COUNT(*) as count FROM services WHERE status = "completed"');
 
-    // NOVO: Izračunaj profit
-    const [paidInvoicesTotal] = await pool.execute(`
-      SELECT COALESCE(SUM(i.amount), 0) as total_income
-      FROM invoices i
-      WHERE i.status = 'paid'
-    `);
-
+    const totalIncome = paidTotal;
     const [servicesCost] = await pool.execute(`
       SELECT COALESCE(SUM(labor_cost), 0) as total_expenses
       FROM services
       WHERE status = 'completed'
     `);
-
-    const totalIncome = parseFloat(paidInvoicesTotal[0]?.total_income || 0);
-    const totalExpenses = parseFloat(servicesCost[0]?.total_expenses || 0);
+    const totalExpenses = parseFloat(servicesCost[0].total_expenses || 0);
 
     res.json({
       notifications,
