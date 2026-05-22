@@ -135,6 +135,8 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
         );
       }
 
+      // ISPRAVLJENO: Izračunaj ukupnu cijenu dijelova
+      let partsTotal = 0;
       if (parts_used && parts_used.length > 0) {
         for (const part of parts_used) {
           const [stock] = await connection.execute(
@@ -155,13 +157,19 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
             'UPDATE warehouse SET quantity = quantity - ? WHERE id = ?',
             [part.quantity, part.part_id]
           );
+
+          // Dodaj cijenu dijela u ukupni trošak
+          partsTotal += part.quantity * part.unit_price;
         }
       }
 
-      // ISPRAVLJENO: Ažuriraj profit vozila u DVA koraka
+      // ISPRAVLJENO: Zbroji rad + dijelovi
+      const totalServiceCost = parseFloat(labor_cost || 0) + partsTotal;
+
+      // Ažuriraj profit vozila u DVA koraka
       await connection.execute(
         'UPDATE vehicles SET total_expenses = total_expenses + ? WHERE id = ?',
-        [labor_cost, vehicleId]
+        [totalServiceCost, vehicleId]
       );
       await connection.execute(
         'UPDATE vehicles SET total_profit = total_income - total_expenses WHERE id = ?',
@@ -204,7 +212,7 @@ router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['ser
     const service = serviceRows[0];
 
     const [partsUsed] = await connection.execute(
-      'SELECT part_id, quantity FROM service_parts WHERE service_id = ?',
+      'SELECT part_id, quantity, unit_price FROM service_parts WHERE service_id = ?',
       [req.params.id]
     );
 
@@ -222,11 +230,15 @@ router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['ser
       );
     }
 
-    // ISPRAVLJENO: Vrati profit ako je servis bio završen
+    // ISPRAVLJENO: Vrati profit ako je servis bio završen (rad + dijelovi)
     if (service.status === 'completed') {
+      // Izračunaj ukupni trošak dijelova iz baze
+      const partsTotal = partsUsed.reduce((sum, part) => sum + (part.quantity * part.unit_price), 0);
+      const totalServiceCost = parseFloat(service.labor_cost || 0) + partsTotal;
+
       await connection.execute(
         'UPDATE vehicles SET total_expenses = total_expenses - ? WHERE id = ?',
-        [service.labor_cost, service.vehicle_id]
+        [totalServiceCost, service.vehicle_id]
       );
       await connection.execute(
         'UPDATE vehicles SET total_profit = total_income - total_expenses WHERE id = ?',
