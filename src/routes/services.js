@@ -3,6 +3,22 @@ const pool = require('../config/database');
 const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
+// NOVO: Dohvati SVE plaćanja mehaničaru (za prikaz u kartici)
+router.get('/mechanic-payments/all', authenticate, authorizeEntity('services'), async (req, res) => {
+  try {
+    const [payments] = await pool.execute(
+      `SELECT mp.*, u.name as mechanic_name 
+       FROM mechanic_payments mp
+       LEFT JOIN users u ON mp.mechanic_id = u.id
+       ORDER BY mp.payment_date DESC`
+    );
+    res.json(payments);
+  } catch (error) {
+    console.error('Get all payments error:', error);
+    res.status(500).json({ error: 'Failed to fetch payments' });
+  }
+});
+
 router.get('/', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const { status, vehicle_id, mechanic_id } = req.query;
