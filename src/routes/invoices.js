@@ -157,13 +157,30 @@ router.post('/:id/payments', authenticate, authorizeEntity('invoices'), authoriz
     );
 
     let newStatus = 'partial';
-    if (newPaid >= totalAmount) newStatus = 'paid';
-    else if (newPaid <= 0) newStatus = 'unpaid';
+    let paidAt = null;
+    
+    if (newPaid >= totalAmount) {
+      newStatus = 'paid';
+      paidAt = new Date();
+    } else if (newPaid <= 0) {
+      newStatus = 'unpaid';
+    }
 
     await pool.execute(
-      'UPDATE invoices SET status = ? WHERE id = ?',
-      [newStatus, invoiceId]
+      'UPDATE invoices SET status = ?, paid_at = ? WHERE id = ?',
+      [newStatus, paidAt, invoiceId]
     );
+
+    // Ažuriraj profit vozila ako je plaćeno
+    if (newStatus === 'paid' && invoice.vehicle_id) {
+      await pool.execute(
+        `UPDATE vehicles 
+         SET total_income = total_income + ?,
+             total_profit = (total_income + ?) - total_expenses
+         WHERE id = ?`,
+        [totalAmount, totalAmount, invoice.vehicle_id]
+      );
+    }
 
     res.json({ 
       message: newStatus === 'paid' ? 'Invoice fully paid' : 'Partial payment recorded',
@@ -206,6 +223,17 @@ router.put('/:id/pay', authenticate, authorizeEntity('invoices'), authorize(['in
       ['paid', invoiceId]
     );
 
+    // Ažuriraj profit vozila
+    if (invoice.vehicle_id) {
+      await pool.execute(
+        `UPDATE vehicles 
+         SET total_income = total_income + ?,
+             total_profit = (total_income + ?) - total_expenses
+         WHERE id = ?`,
+        [totalAmount, totalAmount, invoice.vehicle_id]
+      );
+    }
+
     res.json({ message: 'Invoice marked as fully paid' });
   } catch (error) {
     console.error('Full pay error:', error);
@@ -230,6 +258,20 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
 
 router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoices.delete']), async (req, res) => {
   try {
+    // Dohvati invoice prije brisanja za ažuriranje profita
+    const [invoiceRows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [req.params.id]);
+    
+    if (invoiceRows.length > 0 && invoiceRows[0].status === 'paid' && invoiceRows[0].vehicle_id) {
+      const amount = parseFloat(invoiceRows[0].amount);
+      await pool.execute(
+        `UPDATE vehicles 
+         SET total_income = total_income - ?,
+             total_profit = (total_income - ?) - total_expenses
+         WHERE id = ?`,
+        [amount, amount, invoiceRows[0].vehicle_id]
+      );
+    }
+
     await pool.execute('DELETE FROM invoices WHERE id = ?', [req.params.id]);
     res.json({ message: 'Invoice deleted successfully' });
   } catch (error) {
