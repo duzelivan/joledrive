@@ -58,16 +58,6 @@ router.get('/:id', authenticate, authorizeEntity('vehicles'), async (req, res) =
       [req.params.id]
     );
 
-    // NOVO: Dodatni troškovi
-    const [expenses] = await pool.execute(
-      `SELECT ve.*, u.name as created_by_name
-       FROM vehicle_expenses ve
-       LEFT JOIN users u ON ve.created_by = u.id
-       WHERE ve.vehicle_id = ?
-       ORDER BY ve.expense_date DESC`,
-      [req.params.id]
-    );
-
     const enrichedInvoices = invoices.map(inv => {
       const paid = parseFloat(inv.paid_amount || 0);
       const total = parseFloat(inv.amount);
@@ -80,7 +70,6 @@ router.get('/:id', authenticate, authorizeEntity('vehicles'), async (req, res) =
     vehicle.service_history = services;
     vehicle.invoices = enrichedInvoices;
     vehicle.documents = documents;
-    vehicle.expenses = expenses;
 
     res.json(vehicle);
   } catch (error) {
@@ -155,161 +144,6 @@ router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['veh
     res.json({ message: 'Vehicle deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete vehicle' });
-  }
-});
-
-// ============================================
-// NOVO: VEHICLE EXPENSES
-// ============================================
-
-router.get('/:id/expenses', authenticate, authorizeEntity('vehicles'), async (req, res) => {
-  try {
-    const [expenses] = await pool.execute(
-      `SELECT ve.*, u.name as created_by_name
-       FROM vehicle_expenses ve
-       LEFT JOIN users u ON ve.created_by = u.id
-       WHERE ve.vehicle_id = ?
-       ORDER BY ve.expense_date DESC`,
-      [req.params.id]
-    );
-    res.json(expenses);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch expenses' });
-  }
-});
-
-router.post('/:id/expenses', authenticate, authorizeEntity('vehicles'), async (req, res) => {
-  try {
-    const { expense_type, amount, description, expense_date } = req.body;
-    const vehicleId = req.params.id;
-
-    if (!expense_type || !amount) {
-      return res.status(400).json({ error: 'Type and amount are required' });
-    }
-
-    const [result] = await pool.execute(
-      `INSERT INTO vehicle_expenses (vehicle_id, expense_type, amount, description, expense_date, created_by)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [vehicleId, expense_type, amount, description || null, expense_date || new Date(), req.user.id]
-    );
-
-    // Ažuriraj financije vozila
-    await pool.execute(
-      `UPDATE vehicles 
-       SET total_expenses = total_expenses + ?,
-           total_profit = total_income - (total_expenses + ?)
-       WHERE id = ?`,
-      [amount, amount, vehicleId]
-    );
-
-    res.status(201).json({ id: result.insertId, message: 'Expense added' });
-  } catch (error) {
-    console.error('Add expense error:', error);
-    res.status(500).json({ error: 'Failed to add expense' });
-  }
-});
-
-router.delete('/expenses/:expenseId', authenticate, authorizeEntity('vehicles'), async (req, res) => {
-  try {
-    const [expense] = await pool.execute(
-      'SELECT vehicle_id, amount FROM vehicle_expenses WHERE id = ?',
-      [req.params.expenseId]
-    );
-
-    if (expense.length === 0) return res.status(404).json({ error: 'Expense not found' });
-
-    const { vehicle_id, amount } = expense[0];
-
-    await pool.execute('DELETE FROM vehicle_expenses WHERE id = ?', [req.params.expenseId]);
-
-    // Vrati financije
-    await pool.execute(
-      `UPDATE vehicles 
-       SET total_expenses = total_expenses - ?,
-           total_profit = total_income - (total_expenses - ?)
-       WHERE id = ?`,
-      [amount, amount, vehicle_id]
-    );
-
-    res.json({ message: 'Expense deleted' });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to delete expense' });
-  }
-});
-
-// ============================================
-// NOVO: FINANCIJSKI IZVJEŠTAJ PO VOZILU
-// ============================================
-
-router.get('/:id/financial-report', authenticate, authorizeEntity('vehicles'), async (req, res) => {
-  try {
-    const vehicleId = req.params.id;
-
-    const [vehicleRows] = await pool.execute(
-      `SELECT id, manufacturer, model, license_plate, total_income, total_expenses, total_profit
-       FROM vehicles WHERE id = ?`,
-      [vehicleId]
-    );
-    if (vehicleRows.length === 0) return res.status(404).json({ error: 'Vehicle not found' });
-
-    // Prihodi (računi)
-    const [invoices] = await pool.execute(
-      `SELECT i.id, i.invoice_number, i.amount, i.issue_date, i.status,
-       COALESCE(SUM(p.amount), 0) as paid_amount
-       FROM invoices i
-       LEFT JOIN invoice_payments p ON i.id = p.invoice_id
-       WHERE i.vehicle_id = ?
-       GROUP BY i.id
-       ORDER BY i.issue_date DESC`,
-      [vehicleId]
-    );
-
-    const totalInvoices = invoices.reduce((sum, i) => sum + parseFloat(i.amount), 0);
-    const totalPaid = invoices.reduce((sum, i) => sum + parseFloat(i.paid_amount), 0);
-
-    // Servisi
-    const [services] = await pool.execute(
-      `SELECT id, description, work_description, labor_cost, total_cost, completed_at
-       FROM services 
-       WHERE vehicle_id = ? AND status = 'completed'
-       ORDER BY completed_at DESC`,
-      [vehicleId]
-    );
-
-    const totalServices = services.reduce((sum, s) => sum + parseFloat(s.total_cost || 0), 0);
-
-    // Ostali troškovi
-    const [expenses] = await pool.execute(
-      `SELECT id, expense_type, amount, description, expense_date
-       FROM vehicle_expenses 
-       WHERE vehicle_id = ?
-       ORDER BY expense_date DESC`,
-      [vehicleId]
-    );
-
-    const totalOtherExpenses = expenses.reduce((sum, e) => sum + parseFloat(e.amount), 0);
-    const totalAllExpenses = totalServices + totalOtherExpenses;
-    const profit = totalInvoices - totalAllExpenses;
-
-    res.json({
-      vehicle: vehicleRows[0],
-      summary: {
-        total_income: totalInvoices,
-        total_paid: totalPaid,
-        total_unpaid: totalInvoices - totalPaid,
-        total_service_costs: totalServices,
-        total_other_expenses: totalOtherExpenses,
-        total_expenses: totalAllExpenses,
-        profit: profit,
-        profit_margin: totalInvoices > 0 ? ((profit / totalInvoices) * 100).toFixed(2) + '%' : '0%'
-      },
-      invoices,
-      services,
-      expenses
-    });
-  } catch (error) {
-    console.error('Financial report error:', error);
-    res.status(500).json({ error: 'Failed to generate report' });
   }
 });
 
