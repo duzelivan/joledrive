@@ -267,41 +267,11 @@ router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['ser
   }
 });
 
-// NOVO: Endpoint za plaćanja mehaničaru
-router.post('/:id/mechanic-payments', authenticate, authorizeEntity('services'), async (req, res) => {
-  try {
-    const { amount, payment_date, note } = req.body;
-    const serviceId = req.params.id;
+// ============================================
+// PLAĆANJA MEHANIČARU - ISPRAVLJENO
+// ============================================
 
-    const [serviceRows] = await pool.execute(
-      'SELECT mechanic_id, labor_cost FROM services WHERE id = ?',
-      [serviceId]
-    );
-
-    if (serviceRows.length === 0) {
-      return res.status(404).json({ error: 'Service not found' });
-    }
-
-    const service = serviceRows[0];
-    
-    if (!service.mechanic_id) {
-      return res.status(400).json({ error: 'No mechanic assigned to this service' });
-    }
-
-    await pool.execute(
-      `INSERT INTO mechanic_payments (mechanic_id, service_id, amount, payment_date, note) 
-       VALUES (?, ?, ?, ?, ?)`,
-      [service.mechanic_id, serviceId, amount, payment_date || new Date(), note || null]
-    );
-
-    res.json({ message: 'Payment recorded successfully' });
-  } catch (error) {
-    console.error('Mechanic payment error:', error);
-    res.status(500).json({ error: 'Failed to record payment' });
-  }
-});
-
-// NOVO: Endpoint za dohvat plaćanja mehaničaru po servisu
+// Dohvati sva plaćanja mehaničaru po servisu
 router.get('/:id/mechanic-payments', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const [payments] = await pool.execute(
@@ -314,11 +284,106 @@ router.get('/:id/mechanic-payments', authenticate, authorizeEntity('services'), 
     );
     res.json(payments);
   } catch (error) {
+    console.error('Get mechanic payments error:', error);
     res.status(500).json({ error: 'Failed to fetch mechanic payments' });
   }
 });
 
-// NOVO: Endpoint za ukupno dugovanje mehaničaru
+// Zabilježi novo plaćanje mehaničaru (s validacijom)
+router.post('/:id/mechanic-payments', authenticate, authorizeEntity('services'), async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+
+    const { amount, payment_date, note } = req.body;
+    const serviceId = req.params.id;
+
+    // Provjeri servis
+    const [serviceRows] = await connection.execute(
+      'SELECT mechanic_id, labor_cost, vehicle_id FROM services WHERE id = ?',
+      [serviceId]
+    );
+
+    if (serviceRows.length === 0) {
+      await connection.rollback();
+      connection.release();
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const service = serviceRows[0];
+    
+    if (!service.mechanic_id) {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({ error: 'No mechanic assigned to this service' });
+    }
+
+    // Provjeri da uplata ne prelazi dugovanje za ovaj servis
+    const [servicePaymentsResult] = await connection.execute(
+      `SELECT COALESCE(SUM(amount), 0) as total_paid 
+       FROM mechanic_payments 
+       WHERE service_id = ?`,
+      [serviceId]
+    );
+
+    const alreadyPaid = parseFloat(servicePaymentsResult[0].total_paid);
+    const laborCost = parseFloat(service.labor_cost || 0);
+    const remainingForService = laborCost - alreadyPaid;
+
+    if (parseFloat(amount) > remainingForService) {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({ 
+        error: `Payment exceeds remaining debt for this service. Remaining: €${remainingForService.toFixed(2)}` 
+      });
+    }
+
+    // Umetni plaćanje
+    const [result] = await connection.execute(
+      `INSERT INTO mechanic_payments (mechanic_id, service_id, amount, payment_date, note, created_by) 
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [service.mechanic_id, serviceId, amount, payment_date || new Date(), note || null, req.user.id]
+    );
+
+    await connection.commit();
+    connection.release();
+
+    res.json({ 
+      id: result.insertId,
+      message: 'Payment recorded successfully',
+      amount: parseFloat(amount),
+      remaining_for_service: remainingForService - parseFloat(amount)
+    });
+
+  } catch (error) {
+    await connection.rollback();
+    connection.release();
+    console.error('Mechanic payment error:', error);
+    res.status(500).json({ error: 'Failed to record payment' });
+  }
+});
+
+// Obriši plaćanje mehaničaru (samo admin)
+router.delete('/mechanic-payments/:paymentId', authenticate, authorize(['admin']), async (req, res) => {
+  try {
+    const [result] = await pool.execute(
+      'DELETE FROM mechanic_payments WHERE id = ?',
+      [req.params.paymentId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    res.json({ message: 'Payment deleted successfully' });
+  } catch (error) {
+    console.error('Delete payment error:', error);
+    res.status(500).json({ error: 'Failed to delete payment' });
+  }
+});
+
+// Endpoint za ukupno dugovanje mehaničaru
 router.get('/mechanic-debt/:mechanicId', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const mechanicId = req.params.mechanicId;
