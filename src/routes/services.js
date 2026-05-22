@@ -6,7 +6,7 @@ const router = express.Router();
 router.get('/', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const { status, vehicle_id, mechanic_id } = req.query;
-    let query = `SELECT s.*, v.manufacturer, v.model, v.chassis_number, u.name as mechanic_name 
+    let query = `SELECT s.*, v.manufacturer, v.model, v.chassis_number, v.license_plate, u.name as mechanic_name 
                  FROM services s 
                  LEFT JOIN vehicles v ON s.vehicle_id = v.id 
                  LEFT JOIN users u ON s.mechanic_id = u.id 
@@ -38,7 +38,7 @@ router.get('/', authenticate, authorizeEntity('services'), async (req, res) => {
 router.get('/:id', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const [services] = await pool.execute(
-      `SELECT s.*, v.manufacturer, v.model, u.name as mechanic_name 
+      `SELECT s.*, v.manufacturer, v.model, v.license_plate, u.name as mechanic_name 
        FROM services s 
        LEFT JOIN vehicles v ON s.vehicle_id = v.id 
        LEFT JOIN users u ON s.mechanic_id = u.id 
@@ -58,7 +58,12 @@ router.get('/:id', authenticate, authorizeEntity('services'), async (req, res) =
       [req.params.id]
     );
 
+    // Izračunaj ukupne troškove (rad + dijelovi)
+    const partsTotal = parts.reduce((sum, part) => sum + (part.quantity * part.unit_price), 0);
+    const laborCost = parseFloat(service.labor_cost || 0);
+    service.total_cost = laborCost + partsTotal;
     service.parts_used = parts;
+
     res.json(service);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch service' });
@@ -135,7 +140,6 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
         );
       }
 
-      // ISPRAVLJENO: Izračunaj ukupnu cijenu dijelova
       let partsTotal = 0;
       if (parts_used && parts_used.length > 0) {
         for (const part of parts_used) {
@@ -158,15 +162,12 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
             [part.quantity, part.part_id]
           );
 
-          // Dodaj cijenu dijela u ukupni trošak
           partsTotal += part.quantity * part.unit_price;
         }
       }
 
-      // ISPRAVLJENO: Zbroji rad + dijelovi
       const totalServiceCost = parseFloat(labor_cost || 0) + partsTotal;
 
-      // Ažuriraj profit vozila u DVA koraka
       await connection.execute(
         'UPDATE vehicles SET total_expenses = total_expenses + ? WHERE id = ?',
         [totalServiceCost, vehicleId]
@@ -230,9 +231,7 @@ router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['ser
       );
     }
 
-    // ISPRAVLJENO: Vrati profit ako je servis bio završen (rad + dijelovi)
     if (service.status === 'completed') {
-      // Izračunaj ukupni trošak dijelova iz baze
       const partsTotal = partsUsed.reduce((sum, part) => sum + (part.quantity * part.unit_price), 0);
       const totalServiceCost = parseFloat(service.labor_cost || 0) + partsTotal;
 
@@ -245,6 +244,9 @@ router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['ser
         [service.vehicle_id]
       );
     }
+
+    // Obriši povezana plaćanja mehaničaru
+    await connection.execute('DELETE FROM mechanic_payments WHERE service_id = ?', [req.params.id]);
 
     await connection.execute('DELETE FROM services WHERE id = ?', [req.params.id]);
 
@@ -262,6 +264,91 @@ router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['ser
     connection.release();
     console.error('Delete service error:', error);
     res.status(500).json({ error: 'Failed to delete service' });
+  }
+});
+
+// NOVO: Endpoint za plaćanja mehaničaru
+router.post('/:id/mechanic-payments', authenticate, authorizeEntity('services'), async (req, res) => {
+  try {
+    const { amount, payment_date, note } = req.body;
+    const serviceId = req.params.id;
+
+    const [serviceRows] = await pool.execute(
+      'SELECT mechanic_id, labor_cost FROM services WHERE id = ?',
+      [serviceId]
+    );
+
+    if (serviceRows.length === 0) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
+
+    const service = serviceRows[0];
+    
+    if (!service.mechanic_id) {
+      return res.status(400).json({ error: 'No mechanic assigned to this service' });
+    }
+
+    await pool.execute(
+      `INSERT INTO mechanic_payments (mechanic_id, service_id, amount, payment_date, note) 
+       VALUES (?, ?, ?, ?, ?)`,
+      [service.mechanic_id, serviceId, amount, payment_date || new Date(), note || null]
+    );
+
+    res.json({ message: 'Payment recorded successfully' });
+  } catch (error) {
+    console.error('Mechanic payment error:', error);
+    res.status(500).json({ error: 'Failed to record payment' });
+  }
+});
+
+// NOVO: Endpoint za dohvat plaćanja mehaničaru po servisu
+router.get('/:id/mechanic-payments', authenticate, authorizeEntity('services'), async (req, res) => {
+  try {
+    const [payments] = await pool.execute(
+      `SELECT mp.*, u.name as mechanic_name 
+       FROM mechanic_payments mp
+       LEFT JOIN users u ON mp.mechanic_id = u.id
+       WHERE mp.service_id = ?
+       ORDER BY mp.payment_date DESC`,
+      [req.params.id]
+    );
+    res.json(payments);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch mechanic payments' });
+  }
+});
+
+// NOVO: Endpoint za ukupno dugovanje mehaničaru
+router.get('/mechanic-debt/:mechanicId', authenticate, authorizeEntity('services'), async (req, res) => {
+  try {
+    const mechanicId = req.params.mechanicId;
+
+    const [laborResult] = await pool.execute(
+      `SELECT COALESCE(SUM(labor_cost), 0) as total_labor 
+       FROM services 
+       WHERE mechanic_id = ? AND status = 'completed'`,
+      [mechanicId]
+    );
+
+    const [paymentResult] = await pool.execute(
+      `SELECT COALESCE(SUM(amount), 0) as total_paid 
+       FROM mechanic_payments 
+       WHERE mechanic_id = ?`,
+      [mechanicId]
+    );
+
+    const totalLabor = parseFloat(laborResult[0].total_labor);
+    const totalPaid = parseFloat(paymentResult[0].total_paid);
+    const remainingDebt = totalLabor - totalPaid;
+
+    res.json({
+      mechanic_id: mechanicId,
+      total_labor: totalLabor,
+      total_paid: totalPaid,
+      remaining_debt: remainingDebt
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch mechanic debt' });
   }
 });
 
