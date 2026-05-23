@@ -19,6 +19,27 @@ const safeParsePermissions = (permissions) => {
   return {}
 }
 
+// PASSWORD POLICY VALIDATOR
+const validatePassword = (password) => {
+  const minLength = 8;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumbers = /\d/.test(password);
+  const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+
+  const errors = [];
+  if (password.length < minLength) errors.push('Minimalno 8 znakova');
+  if (!hasUpperCase) errors.push('Jedno veliko slovo');
+  if (!hasLowerCase) errors.push('Jedno malo slovo');
+  if (!hasNumbers) errors.push('Jedna brojka');
+  if (!hasSpecialChar) errors.push('Jedan specijalni znak (!@#$%^&*...)');
+
+  return {
+    valid: errors.length === 0,
+    errors: errors
+  };
+};
+
 // Login
 router.post('/login', async (req, res) => {
   try {
@@ -80,7 +101,7 @@ router.post('/login', async (req, res) => {
         role: user.role,
         type: user.type,
         permissions: safeParsePermissions(user.permissions),
-        entities: safeParsePermissions(user.entities)  // <-- DODANO
+        entities: safeParsePermissions(user.entities)
       }
     });
   } catch (error) {
@@ -124,12 +145,52 @@ router.get('/me', authenticate, async (req, res) => {
         role: req.user.role,
         type: req.user.type,
         permissions: safeParsePermissions(req.user.permissions),
-        entities: safeParsePermissions(req.user.entities)  // <-- DODANO
+        entities: safeParsePermissions(req.user.entities)
       }
     })
   } catch (error) {
     console.error('Auth /me error:', error)
     res.status(500).json({ error: 'Failed to get user data' })
+  }
+});
+
+// NOVO: Promjena lozinke s policy-jem
+router.post('/change-password', authenticate, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Both passwords are required' });
+    }
+
+    const validation = validatePassword(newPassword);
+    if (!validation.valid) {
+      return res.status(400).json({ 
+        error: 'Password does not meet requirements',
+        requirements: validation.errors
+      });
+    }
+
+    const [users] = await pool.execute(
+      'SELECT password FROM users WHERE id = ?',
+      [req.user.id]
+    );
+
+    const validPassword = await bcrypt.compare(currentPassword, users[0].password);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await pool.execute(
+      'UPDATE users SET password = ? WHERE id = ?',
+      [hashedPassword, req.user.id]
+    );
+
+    res.json({ message: 'Password changed successfully' });
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({ error: 'Failed to change password' });
   }
 });
 
