@@ -1,7 +1,11 @@
 const express = require('express');
+const axios = require('axios');
 const pool = require('../config/database');
 const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
+
+const DELETE_FILE_URL = 'https://joledrive.com/delete-file.php';
+const EMAIL_API_SECRET = process.env.EMAIL_API_SECRET;
 
 async function enrichInvoiceWithPayments(invoice) {
   if (!invoice) return null;
@@ -107,7 +111,7 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
       invoice_number, description, amount, vehicle_id, user_id,
       due_date, recurring_type, recurring_interval,
       file_path, file_size, file_type,
-      invoice_type = 'income'  // NOVO: default prihod
+      invoice_type = 'income'
     } = req.body;
 
     const [result] = await pool.execute(
@@ -177,22 +181,18 @@ router.post('/:id/payments', authenticate, authorizeEntity('invoices'), authoriz
       [newStatus, paidAt, invoiceId]
     );
 
-    // NOVO: Različita logika za prihod vs trošak
     if (newStatus === 'paid' && invoice.vehicle_id) {
       if (invoice.invoice_type === 'expense') {
-        // TROŠAK: Dodaj u total_expenses
         await pool.execute(
           'UPDATE vehicles SET total_expenses = total_expenses + ? WHERE id = ?',
           [totalAmount, invoice.vehicle_id]
         );
       } else {
-        // PRIHOD: Dodaj u total_income (stara logika)
         await pool.execute(
           'UPDATE vehicles SET total_income = total_income + ? WHERE id = ?',
           [totalAmount, invoice.vehicle_id]
         );
       }
-      // Oba slučaja: izračunaj profit
       await pool.execute(
         'UPDATE vehicles SET total_profit = total_income - total_expenses WHERE id = ?',
         [invoice.vehicle_id]
@@ -240,7 +240,6 @@ router.put('/:id/pay', authenticate, authorizeEntity('invoices'), authorize(['in
       ['paid', invoiceId]
     );
 
-    // NOVO: Različita logika za prihod vs trošak
     if (invoice.vehicle_id) {
       if (invoice.invoice_type === 'expense') {
         await pool.execute(
@@ -281,11 +280,15 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
   }
 });
 
+// ============================================
+// DELETE: Briše račun, plaćanja, fajl i ažurira profit
+// ============================================
 router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoices.delete']), async (req, res) => {
   try {
+    // 1. Dohvati podatke o računu
     const [invoiceRows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [req.params.id]);
     
-    // NOVO: Vrati profit/trošak ako je račun bio plaćen
+    // 2. Vrati profit/trošak ako je račun bio plaćen
     if (invoiceRows.length > 0 && invoiceRows[0].status === 'paid' && invoiceRows[0].vehicle_id) {
       const amount = parseFloat(invoiceRows[0].amount);
       
@@ -306,7 +309,31 @@ router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['inv
       );
     }
 
+    // 3. Obriši povezani fajl na hostingu
+    if (invoiceRows.length > 0 && invoiceRows[0].file_path) {
+      try {
+        const response = await axios.post(DELETE_FILE_URL, {
+          file_path: invoiceRows[0].file_path
+        }, {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-API-Secret': EMAIL_API_SECRET
+          },
+          timeout: 10000
+        });
+        
+        console.log('Invoice file deletion response:', response.data);
+      } catch (fileError) {
+        console.error('Invoice file deletion warning:', fileError.response?.data || fileError.message);
+      }
+    }
+
+    // 4. Obriši povezana plaćanja
+    await pool.execute('DELETE FROM invoice_payments WHERE invoice_id = ?', [req.params.id]);
+
+    // 5. Obriši račun
     await pool.execute('DELETE FROM invoices WHERE id = ?', [req.params.id]);
+    
     res.json({ message: 'Invoice deleted successfully' });
   } catch (error) {
     console.error('Delete error:', error);
