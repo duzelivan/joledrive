@@ -5,6 +5,27 @@ const pool = require('../config/database');
 const { authenticate, requireAdmin, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
+// PASSWORD POLICY VALIDATOR
+const validatePassword = (password) => {
+  const minLength = 8;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumbers = /\d/.test(password);
+  const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+
+  const errors = [];
+  if (password.length < minLength) errors.push('Minimalno 8 znakova');
+  if (!hasUpperCase) errors.push('Jedno veliko slovo');
+  if (!hasLowerCase) errors.push('Jedno malo slovo');
+  if (!hasNumbers) errors.push('Jedna brojka');
+  if (!hasSpecialChar) errors.push('Jedan specijalni znak (!@#$%^&*...)');
+
+  return {
+    valid: errors.length === 0,
+    errors: errors
+  };
+};
+
 router.get('/', authenticate, authorizeEntity('users'), requireAdmin, async (req, res) => {
   try {
     const [users] = await pool.execute(
@@ -66,6 +87,17 @@ router.post('/', authenticate, authorizeEntity('users'), requireAdmin, async (re
     // Ako je tip 'user', email i password su obavezni
     if (type === 'user' && (!email || !password)) {
       return res.status(400).json({ error: 'Email and password are required for application users' });
+    }
+
+    // PASSWORD POLICY za korisnike aplikacije
+    if (type === 'user' && password) {
+      const validation = validatePassword(password);
+      if (!validation.valid) {
+        return res.status(400).json({ 
+          error: 'Password does not meet security requirements',
+          requirements: validation.errors
+        });
+      }
     }
 
     let hashedPassword = null;
@@ -151,6 +183,15 @@ router.put('/:id', authenticate, authorizeEntity('users'), async (req, res) => {
     if (company_oib !== undefined) { updates.push('company_oib = ?'); values.push(company_oib); }
     
     if (password && password.length > 0) {
+      // PASSWORD POLICY i pri ažuriranju
+      const validation = validatePassword(password);
+      if (!validation.valid) {
+        return res.status(400).json({ 
+          error: 'Password does not meet security requirements',
+          requirements: validation.errors
+        });
+      }
+      
       const hashedPassword = await bcrypt.hash(password, 10);
       updates.push('password = ?');
       values.push(hashedPassword);
@@ -189,7 +230,13 @@ router.post('/:id/reset-password', authenticate, authorizeEntity('users'), requi
     if (userRows.length === 0) return res.status(404).json({ error: 'User not found' });
     if (userRows[0].type === 'client') return res.status(400).json({ error: 'Cannot reset password for clients' });
 
-    const newPassword = Math.random().toString(36).substring(2, 10);
+    // Generiraj jaku random lozinku
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
+    let newPassword = '';
+    for (let i = 0; i < 12; i++) {
+      newPassword += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
     await pool.execute(
