@@ -20,6 +20,14 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 }
 });
 
+// SIGURNO: Whitelist za sortiranje
+const ALLOWED_SORT = {
+  'title': 'd.title ASC',
+  'title_desc': 'd.title DESC',
+  'date': 'd.created_at DESC',
+  'date_asc': 'd.created_at ASC'
+};
+
 router.get('/', authenticate, authorizeEntity('documents'), async (req, res) => {
   try {
     const { search, type, vehicle_id, sort_by } = req.query;
@@ -43,7 +51,9 @@ router.get('/', authenticate, authorizeEntity('documents'), async (req, res) => 
       params.push(vehicle_id);
     }
 
-    query += ' ORDER BY ' + (sort_by === 'title' ? 'd.title' : 'd.created_at DESC');
+    // SIGURNO: Koristi whitelist
+    const sortClause = ALLOWED_SORT[sort_by] || ALLOWED_SORT['date'];
+    query += ' ORDER BY ' + sortClause;
 
     const [documents] = await pool.execute(query, params);
     res.json(documents);
