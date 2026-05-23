@@ -30,7 +30,7 @@ async function enrichInvoiceWithPayments(invoice) {
 
 router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
-    const { status, vehicle_id, search } = req.query;
+    const { status, vehicle_id, search, invoice_type } = req.query;
     let query = `SELECT i.*, v.manufacturer, v.model, v.license_plate 
                  FROM invoices i 
                  LEFT JOIN vehicles v ON i.vehicle_id = v.id 
@@ -40,6 +40,10 @@ router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
     if (vehicle_id) {
       query += ' AND i.vehicle_id = ?';
       params.push(vehicle_id);
+    }
+    if (invoice_type) {
+      query += ' AND i.invoice_type = ?';
+      params.push(invoice_type);
     }
     if (search) {
       query += ' AND (i.invoice_number LIKE ? OR i.description LIKE ?)';
@@ -102,16 +106,18 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
     const {
       invoice_number, description, amount, vehicle_id, user_id,
       due_date, recurring_type, recurring_interval,
-      file_path, file_size, file_type
+      file_path, file_size, file_type,
+      invoice_type = 'income'  // NOVO: default prihod
     } = req.body;
 
     const [result] = await pool.execute(
       `INSERT INTO invoices (invoice_number, description, amount, vehicle_id, user_id, 
-        due_date, status, recurring_type, recurring_interval, file_path, file_size, file_type, created_by) 
-       VALUES (?, ?, ?, ?, ?, ?, 'unpaid', ?, ?, ?, ?, ?, ?)`,
+        due_date, status, recurring_type, recurring_interval, file_path, file_size, file_type, 
+        created_by, invoice_type) 
+       VALUES (?, ?, ?, ?, ?, ?, 'unpaid', ?, ?, ?, ?, ?, ?, ?)`,
       [invoice_number, description, amount, vehicle_id || null, user_id || null,
        due_date, recurring_type || null, recurring_interval || null,
-       file_path || null, file_size || null, file_type || null, req.user.id]
+       file_path || null, file_size || null, file_type || null, req.user.id, invoice_type]
     );
 
     res.status(201).json({ id: result.insertId, message: 'Invoice created successfully' });
@@ -171,14 +177,22 @@ router.post('/:id/payments', authenticate, authorizeEntity('invoices'), authoriz
       [newStatus, paidAt, invoiceId]
     );
 
-    // ISPRAVLJENO: Ažuriraj profit vozila u DVA koraka
+    // NOVO: Različita logika za prihod vs trošak
     if (newStatus === 'paid' && invoice.vehicle_id) {
-      // Korak 1: Dodaj prihod
-      await pool.execute(
-        'UPDATE vehicles SET total_income = total_income + ? WHERE id = ?',
-        [totalAmount, invoice.vehicle_id]
-      );
-      // Korak 2: Izračunaj profit
+      if (invoice.invoice_type === 'expense') {
+        // TROŠAK: Dodaj u total_expenses
+        await pool.execute(
+          'UPDATE vehicles SET total_expenses = total_expenses + ? WHERE id = ?',
+          [totalAmount, invoice.vehicle_id]
+        );
+      } else {
+        // PRIHOD: Dodaj u total_income (stara logika)
+        await pool.execute(
+          'UPDATE vehicles SET total_income = total_income + ? WHERE id = ?',
+          [totalAmount, invoice.vehicle_id]
+        );
+      }
+      // Oba slučaja: izračunaj profit
       await pool.execute(
         'UPDATE vehicles SET total_profit = total_income - total_expenses WHERE id = ?',
         [invoice.vehicle_id]
@@ -226,12 +240,19 @@ router.put('/:id/pay', authenticate, authorizeEntity('invoices'), authorize(['in
       ['paid', invoiceId]
     );
 
-    // ISPRAVLJENO: Ažuriraj profit vozila u DVA koraka
+    // NOVO: Različita logika za prihod vs trošak
     if (invoice.vehicle_id) {
-      await pool.execute(
-        'UPDATE vehicles SET total_income = total_income + ? WHERE id = ?',
-        [totalAmount, invoice.vehicle_id]
-      );
+      if (invoice.invoice_type === 'expense') {
+        await pool.execute(
+          'UPDATE vehicles SET total_expenses = total_expenses + ? WHERE id = ?',
+          [totalAmount, invoice.vehicle_id]
+        );
+      } else {
+        await pool.execute(
+          'UPDATE vehicles SET total_income = total_income + ? WHERE id = ?',
+          [totalAmount, invoice.vehicle_id]
+        );
+      }
       await pool.execute(
         'UPDATE vehicles SET total_profit = total_income - total_expenses WHERE id = ?',
         [invoice.vehicle_id]
@@ -247,11 +268,11 @@ router.put('/:id/pay', authenticate, authorizeEntity('invoices'), authorize(['in
 
 router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoices.edit']), async (req, res) => {
   try {
-    const { invoice_number, description, amount, due_date, status } = req.body;
+    const { invoice_number, description, amount, due_date, status, invoice_type } = req.body;
     
     await pool.execute(
-      'UPDATE invoices SET invoice_number = ?, description = ?, amount = ?, due_date = ?, status = ? WHERE id = ?',
-      [invoice_number, description, amount, due_date, status, req.params.id]
+      'UPDATE invoices SET invoice_number = ?, description = ?, amount = ?, due_date = ?, status = ?, invoice_type = ? WHERE id = ?',
+      [invoice_number, description, amount, due_date, status, invoice_type, req.params.id]
     );
     res.json({ message: 'Invoice updated successfully' });
   } catch (error) {
@@ -264,13 +285,21 @@ router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['inv
   try {
     const [invoiceRows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [req.params.id]);
     
-    // ISPRAVLJENO: Vrati profit ako je račun bio plaćen
+    // NOVO: Vrati profit/trošak ako je račun bio plaćen
     if (invoiceRows.length > 0 && invoiceRows[0].status === 'paid' && invoiceRows[0].vehicle_id) {
       const amount = parseFloat(invoiceRows[0].amount);
-      await pool.execute(
-        'UPDATE vehicles SET total_income = total_income - ? WHERE id = ?',
-        [amount, invoiceRows[0].vehicle_id]
-      );
+      
+      if (invoiceRows[0].invoice_type === 'expense') {
+        await pool.execute(
+          'UPDATE vehicles SET total_expenses = total_expenses - ? WHERE id = ?',
+          [amount, invoiceRows[0].vehicle_id]
+        );
+      } else {
+        await pool.execute(
+          'UPDATE vehicles SET total_income = total_income - ? WHERE id = ?',
+          [amount, invoiceRows[0].vehicle_id]
+        );
+      }
       await pool.execute(
         'UPDATE vehicles SET total_profit = total_income - total_expenses WHERE id = ?',
         [invoiceRows[0].vehicle_id]
