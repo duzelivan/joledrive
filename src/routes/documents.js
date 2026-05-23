@@ -1,9 +1,14 @@
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
+const axios = require('axios');
 const pool = require('../config/database');
 const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
+
+const DELETE_FILE_URL = 'https://joledrive.com/delete-file.php';
+const EMAIL_API_SECRET = process.env.EMAIL_API_SECRET;
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -78,18 +83,40 @@ router.post('/', authenticate, authorizeEntity('documents'), authorize(['documen
   }
 });
 
+// ============================================
+// DELETE: Briše i iz baze i fajl na hostingu
+// ============================================
 router.delete('/:id', authenticate, authorizeEntity('documents'), authorize(['documents.delete']), async (req, res) => {
   try {
+    // 1. Dohvati podatke o dokumentu
     const [docs] = await pool.execute('SELECT file_path FROM documents WHERE id = ?', [req.params.id]);
+    
+    // 2. Obriši fajl na hostingu preko API-ja
     if (docs.length > 0 && docs[0].file_path) {
-      const fs = require('fs');
-      const fullPath = path.join(__dirname, '../../', docs[0].file_path);
-      if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+      try {
+        const response = await axios.post(DELETE_FILE_URL, {
+          file_path: docs[0].file_path
+        }, {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-API-Secret': EMAIL_API_SECRET
+          },
+          timeout: 10000
+        });
+        
+        console.log('File deletion response:', response.data);
+      } catch (fileError) {
+        // Logiraj ali ne prekidaj - fajl možda već ne postoji
+        console.error('File deletion warning:', fileError.response?.data || fileError.message);
+      }
     }
 
+    // 3. Obriši iz baze
     await pool.execute('DELETE FROM documents WHERE id = ?', [req.params.id]);
+    
     res.json({ message: 'Document deleted successfully' });
   } catch (error) {
+    console.error('Delete document error:', error);
     res.status(500).json({ error: 'Failed to delete document' });
   }
 });
