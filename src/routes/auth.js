@@ -19,7 +19,6 @@ const safeParsePermissions = (permissions) => {
   return {}
 }
 
-// PASSWORD POLICY VALIDATOR
 const validatePassword = (password) => {
   const minLength = 8;
   const hasUpperCase = /[A-Z]/.test(password);
@@ -40,7 +39,22 @@ const validatePassword = (password) => {
   };
 };
 
-// Login
+function generateTokens(user) {
+  const accessToken = jwt.sign(
+    { id: user.id, email: user.email, role: user.role, type: 'access' },
+    process.env.JWT_SECRET,
+    { expiresIn: '15m' }
+  );
+  
+  const refreshToken = jwt.sign(
+    { id: user.id, type: 'refresh' },
+    process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+  
+  return { accessToken, refreshToken };
+}
+
 router.post('/login', async (req, res) => {
   try {
     const { email, password, totpCode } = req.body;
@@ -56,7 +70,6 @@ router.post('/login', async (req, res) => {
 
     const user = users[0];
 
-    // NOVO: Clienti se ne mogu prijaviti
     if (user.type === 'client') {
       return res.status(403).json({ error: 'Clients cannot login to the application' });
     }
@@ -67,7 +80,6 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Check 2FA if enabled
     if (user.totp_secret) {
       const verified = speakeasy.totp.verify({
         secret: user.totp_secret,
@@ -80,20 +92,21 @@ router.post('/login', async (req, res) => {
       }
     }
 
-    // Update last login
     await pool.execute(
       'UPDATE users SET last_login = NOW() WHERE id = ?',
       [user.id]
     );
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '8h' }
+    const { accessToken, refreshToken } = generateTokens(user);
+
+    await pool.execute(
+      'UPDATE users SET refresh_token = ? WHERE id = ?',
+      [refreshToken, user.id]
     );
 
     res.json({
-      token,
+      token: accessToken,
+      refreshToken: refreshToken,
       user: {
         id: user.id,
         name: user.name,
@@ -110,7 +123,66 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// Setup 2FA
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    
+    if (!refreshToken) {
+      return res.status(401).json({ error: 'Refresh token required' });
+    }
+
+    const decoded = jwt.verify(
+      refreshToken, 
+      process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET
+    );
+
+    if (decoded.type !== 'refresh') {
+      return res.status(401).json({ error: 'Invalid token type' });
+    }
+
+    const [users] = await pool.execute(
+      'SELECT id, email, name, role, type, permissions, entities, refresh_token FROM users WHERE id = ? AND active = 1',
+      [decoded.id]
+    );
+
+    if (users.length === 0) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    if (users[0].refresh_token !== refreshToken) {
+      return res.status(401).json({ error: 'Token invalidated. Please login again.' });
+    }
+
+    const { accessToken, refreshToken: newRefreshToken } = generateTokens(users[0]);
+
+    await pool.execute(
+      'UPDATE users SET refresh_token = ? WHERE id = ?',
+      [newRefreshToken, users[0].id]
+    );
+
+    res.json({
+      token: accessToken,
+      refreshToken: newRefreshToken
+    });
+
+  } catch (error) {
+    console.error('Refresh error:', error);
+    res.status(401).json({ error: 'Invalid or expired refresh token' });
+  }
+});
+
+router.post('/logout', authenticate, async (req, res) => {
+  try {
+    await pool.execute(
+      'UPDATE users SET refresh_token = NULL WHERE id = ?',
+      [req.user.id]
+    );
+    res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Logout failed' });
+  }
+});
+
 router.post('/setup-2fa', authenticate, async (req, res) => {
   try {
     const secret = speakeasy.generateSecret({
@@ -134,7 +206,6 @@ router.post('/setup-2fa', authenticate, async (req, res) => {
   }
 });
 
-// Verify session
 router.get('/me', authenticate, async (req, res) => {
   try {
     res.json({
@@ -154,7 +225,6 @@ router.get('/me', authenticate, async (req, res) => {
   }
 });
 
-// NOVO: Promjena lozinke s policy-jem
 router.post('/change-password', authenticate, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
