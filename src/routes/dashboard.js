@@ -1,6 +1,6 @@
 const express = require('express');
 const pool = require('../config/database');
-const { authenticate, authorizeEntity } = require('../middleware/auth');
+const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
 router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => {
@@ -34,20 +34,24 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
       [today]
     );
 
+    // ISPRAVKA: Samo prihodi (invoice_type = 'income' ili NULL)
     const [unpaidResult] = await pool.execute(`
       SELECT i.id, i.amount 
       FROM invoices i
       LEFT JOIN invoice_payments p ON i.id = p.invoice_id
       WHERE p.id IS NULL
+      AND (i.invoice_type = 'income' OR i.invoice_type IS NULL)
     `);
     
     let unpaidCount = unpaidResult.length;
     let unpaidTotal = unpaidResult.reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0);
 
+    // ISPRAVKA: Samo prihodi (partial)
     const [partialResult] = await pool.execute(`
       SELECT i.id, i.amount, SUM(p.amount) as paid
       FROM invoices i
       JOIN invoice_payments p ON i.id = p.invoice_id
+      WHERE (i.invoice_type = 'income' OR i.invoice_type IS NULL)
       GROUP BY i.id, i.amount
       HAVING paid < i.amount
     `);
@@ -55,10 +59,12 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
     let partialCount = partialResult.length;
     let partialTotal = partialResult.reduce((sum, inv) => sum + ((Number(inv.amount) || 0) - (Number(inv.paid) || 0)), 0);
 
+    // ISPRAVKA: Samo prihodi (paid)
     const [paidResult] = await pool.execute(`
       SELECT i.id, i.amount
       FROM invoices i
       JOIN invoice_payments p ON i.id = p.invoice_id
+      WHERE (i.invoice_type = 'income' OR i.invoice_type IS NULL)
       GROUP BY i.id, i.amount
       HAVING SUM(p.amount) >= i.amount
     `);
@@ -72,12 +78,21 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
     const [[serviceCount]] = await pool.execute('SELECT COUNT(*) as count FROM services WHERE status = "completed"');
 
     const totalIncome = paidTotal;
+    
+    // ISPRAVKA: Troškovi uključuju i expense račune i servise
     const [servicesCost] = await pool.execute(`
       SELECT COALESCE(SUM(labor_cost), 0) as total_expenses
       FROM services
       WHERE status = 'completed'
     `);
-    const totalExpenses = parseFloat(servicesCost[0].total_expenses || 0);
+    
+    const [expenseInvoices] = await pool.execute(`
+      SELECT COALESCE(SUM(amount), 0) as total
+      FROM invoices
+      WHERE invoice_type = 'expense' AND status = 'paid'
+    `);
+    
+    const totalExpenses = parseFloat(servicesCost[0].total_expenses || 0) + parseFloat(expenseInvoices[0].total || 0);
 
     res.json({
       notifications,
@@ -111,27 +126,44 @@ router.get('/analytics', authenticate, authorizeEntity('dashboard'), async (req,
     let params = [];
 
     if (period === 'month') {
+      // ISPRAVKA: Prihodi = samo income računi
       incomeQuery = `SELECT MONTH(created_at) as period, COALESCE(SUM(amount), 0) as total 
-                      FROM invoices WHERE status = 'paid' AND YEAR(created_at) = ? 
+                      FROM invoices 
+                      WHERE status = 'paid' 
+                      AND (invoice_type = 'income' OR invoice_type IS NULL)
+                      AND YEAR(created_at) = ? 
                       GROUP BY MONTH(created_at)`;
+      // ISPRAVKA: Troškovi = servisi + expense računi
       expenseQuery = `SELECT MONTH(service_date) as period, COALESCE(SUM(labor_cost), 0) as total 
-                       FROM services WHERE status = 'completed' AND YEAR(service_date) = ? 
+                       FROM services 
+                       WHERE status = 'completed' 
+                       AND YEAR(service_date) = ? 
                        GROUP BY MONTH(service_date)`;
       params = [year || new Date().getFullYear()];
     } else if (period === 'week') {
       incomeQuery = `SELECT WEEK(created_at) as period, COALESCE(SUM(amount), 0) as total 
-                      FROM invoices WHERE status = 'paid' AND YEAR(created_at) = ? AND MONTH(created_at) = ? 
+                      FROM invoices 
+                      WHERE status = 'paid' 
+                      AND (invoice_type = 'income' OR invoice_type IS NULL)
+                      AND YEAR(created_at) = ? AND MONTH(created_at) = ? 
                       GROUP BY WEEK(created_at)`;
       expenseQuery = `SELECT WEEK(service_date) as period, COALESCE(SUM(labor_cost), 0) as total 
-                       FROM services WHERE status = 'completed' AND YEAR(service_date) = ? AND MONTH(service_date) = ? 
+                       FROM services 
+                       WHERE status = 'completed' 
+                       AND YEAR(service_date) = ? AND MONTH(service_date) = ? 
                        GROUP BY WEEK(service_date)`;
       params = [year || new Date().getFullYear(), month || new Date().getMonth() + 1];
     } else {
       incomeQuery = `SELECT DATE_FORMAT(created_at, '%Y-%m') as period, COALESCE(SUM(amount), 0) as total 
-                      FROM invoices WHERE status = 'paid' AND created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
+                      FROM invoices 
+                      WHERE status = 'paid' 
+                      AND (invoice_type = 'income' OR invoice_type IS NULL)
+                      AND created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
                       GROUP BY DATE_FORMAT(created_at, '%Y-%m')`;
       expenseQuery = `SELECT DATE_FORMAT(service_date, '%Y-%m') as period, COALESCE(SUM(labor_cost), 0) as total 
-                       FROM services WHERE status = 'completed' AND service_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
+                       FROM services 
+                       WHERE status = 'completed' 
+                       AND service_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
                        GROUP BY DATE_FORMAT(service_date, '%Y-%m')`;
     }
 
