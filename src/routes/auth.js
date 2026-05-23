@@ -80,7 +80,7 @@ router.post('/login', async (req, res) => {
         role: user.role,
         type: user.type,
         permissions: safeParsePermissions(user.permissions),
-        entities: safeParsePermissions(user.entities)
+        entities: safeParsePermissions(user.entities)  // <-- DODANO
       }
     });
   } catch (error) {
@@ -124,7 +124,7 @@ router.get('/me', authenticate, async (req, res) => {
         role: req.user.role,
         type: req.user.type,
         permissions: safeParsePermissions(req.user.permissions),
-        entities: safeParsePermissions(req.user.entities)
+        entities: safeParsePermissions(req.user.entities)  // <-- DODANO
       }
     })
   } catch (error) {
