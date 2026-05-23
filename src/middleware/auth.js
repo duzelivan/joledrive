@@ -9,6 +9,11 @@ const authenticate = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    
+    if (decoded.type !== 'access') {
+      return res.status(401).json({ error: 'Invalid token type. Use access token.' });
+    }
+
     const [users] = await pool.execute(
       'SELECT id, email, name, role, permissions, entities FROM users WHERE id = ?',
       [decoded.id]
@@ -21,6 +26,9 @@ const authenticate = async (req, res, next) => {
     req.user = users[0];
     next();
   } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
     res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -39,14 +47,12 @@ const authorize = (permissions) => {
   };
 };
 
-// NOVO: Provjera pristupa entitetu (modulu)
 const authorizeEntity = (entity) => {
   return (req, res, next) => {
     if (req.user.role === 'admin') return next();
 
     const userEntities = safeParse(req.user.entities);
     
-    // Ako nema definiranih entities, dopusti sve (backwards compatibility)
     if (!userEntities || Object.keys(userEntities).length === 0) return next();
 
     if (userEntities[entity] !== true) {
@@ -63,7 +69,6 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-// Helper za sigurno parsiranje
 function safeParse(json) {
   if (!json) return {};
   if (typeof json === 'object') return json;
