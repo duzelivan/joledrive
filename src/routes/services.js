@@ -159,9 +159,9 @@ router.post('/', authenticate, authorizeEntity('services'), authorize(['services
     const { vehicle_id, service_type, description, service_date, estimated_cost } = req.body;
 
     const [result] = await pool.execute(
-      `INSERT INTO services (vehicle_id, service_type, description, service_date, estimated_cost, status, created_by) 
-       VALUES (?, ?, ?, ?, ?, 'scheduled', ?)`,
-      [vehicle_id, service_type, description, service_date, estimated_cost, req.user.id]
+      `INSERT INTO services (vehicle_id, service_type, description, service_date, status, created_by) 
+       VALUES (?, ?, ?, ?, 'scheduled', ?)`,
+      [vehicle_id, service_type, description, service_date, req.user.id]
     );
 
     res.status(201).json({ id: result.insertId, message: 'Service scheduled successfully' });
