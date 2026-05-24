@@ -43,7 +43,7 @@ function generateTokens(user) {
   const accessToken = jwt.sign(
     { id: user.id, email: user.email, role: user.role, type: 'access' },
     process.env.JWT_SECRET,
-    { expiresIn: '15m' }
+    { expiresIn: '1h' }  // ← produženo s 15m na 1h
   );
   
   const refreshToken = jwt.sign(
