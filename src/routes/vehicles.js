@@ -36,10 +36,12 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB
 });
 
-// Upload endpoint
+// Upload endpoint — returns full URL
 router.post('/upload', authenticate, upload.single('image'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const imageUrl = `/uploads/vehicles/${req.file.filename}`;
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  const imageUrl = `${protocol}://${host}/uploads/vehicles/${req.file.filename}`;
   res.json({ image_url: imageUrl, message: 'Image uploaded' });
 });
 
