@@ -29,12 +29,28 @@ const validatePassword = (password) => {
 router.get('/', authenticate, authorizeEntity('users'), requireAdmin, async (req, res) => {
   try {
     const [users] = await pool.execute(
-      `SELECT id, name, email, role, type, phone, driver_license, address, oib, 
-              company_name, company_oib, active, created_at, last_login 
-       FROM users 
-       ORDER BY created_at DESC`
+      `SELECT u.id, u.name, u.email, u.role, u.type, u.phone, u.driver_license, 
+              u.address, u.oib, u.company_name, u.company_oib, u.active, 
+              u.created_at, u.last_login,
+              v.license_plate as assigned_license_plate,
+              v.manufacturer as assigned_manufacturer,
+              v.model as assigned_model
+       FROM users u
+       LEFT JOIN vehicles v ON u.id = v.assigned_to
+       ORDER BY u.created_at DESC`
     );
-    res.json(users);
+
+    // Format assigned_vehicle field
+    const formatted = users.map(u => ({
+      ...u,
+      assigned_vehicle: u.assigned_license_plate ? {
+        license_plate: u.assigned_license_plate,
+        manufacturer: u.assigned_manufacturer,
+        model: u.assigned_model
+      } : null
+    }));
+
+    res.json(formatted);
   } catch (error) {
     console.error('Fetch users error:', error);
     res.status(500).json({ error: 'Failed to fetch users' });
