@@ -138,11 +138,21 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
 
     const totalIncome = paidTotal;
     
-    // === EXPENSES: completed services labor + paid expense invoices ===
-    const [servicesCost] = await pool.execute(`
-      SELECT COALESCE(SUM(labor_cost), 0) as total_expenses
-      FROM services
-      WHERE status = 'completed'
+    // === EXPENSES: calculate directly from services + parts with admin logic ===
+    // Admin labor = 0, Mechanic labor = labor_cost, Parts always count
+    const [serviceExpensesResult] = await pool.execute(`
+      SELECT COALESCE(SUM(
+        (CASE WHEN u.role = 'admin' THEN 0 ELSE s.labor_cost END) + 
+        COALESCE(sp.parts_total, 0)
+      ), 0) as total
+      FROM services s
+      LEFT JOIN users u ON s.mechanic_id = u.id
+      LEFT JOIN (
+        SELECT service_id, SUM(quantity * unit_price) as parts_total
+        FROM service_parts
+        GROUP BY service_id
+      ) sp ON s.id = sp.service_id
+      WHERE s.status = 'completed'
     `);
     
     const [expenseInvoices] = await pool.execute(`
@@ -151,7 +161,7 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
       WHERE invoice_type = 'expense' AND status = 'paid'
     `);
     
-    const totalExpenses = parseFloat(servicesCost[0].total_expenses || 0) + parseFloat(expenseInvoices[0].total || 0);
+    const totalExpenses = parseFloat(serviceExpensesResult[0].total || 0) + parseFloat(expenseInvoices[0].total || 0);
 
     res.json({
       notifications: enrichedNotifications,
@@ -197,37 +207,70 @@ router.get('/analytics', authenticate, authorizeEntity('dashboard'), async (req,
                       AND (invoice_type = 'income' OR invoice_type IS NULL)
                       AND YEAR(created_at) = ? 
                       GROUP BY MONTH(created_at)`;
-      // Expenses: services labor_cost + expense invoices
-      expenseQuery = `SELECT MONTH(combined.date_col) as period, COALESCE(SUM(combined.amount), 0) as total
+      
+      // Expenses: services (labor + parts, with admin logic) + expense invoices
+      expenseQuery = `SELECT 
+                        MONTH(combined.date_col) as period, 
+                        COALESCE(SUM(combined.amount), 0) as total
                        FROM (
-                         SELECT service_date as date_col, labor_cost as amount
-                         FROM services WHERE status = 'completed' AND YEAR(service_date) = ?
+                         -- Service costs: admin labor = 0, mechanic labor = labor_cost
+                         SELECT 
+                           s.service_date as date_col,
+                           (CASE WHEN u.role = 'admin' THEN 0 ELSE s.labor_cost END + COALESCE(sp.parts_total, 0)) as amount
+                         FROM services s
+                         LEFT JOIN users u ON s.mechanic_id = u.id
+                         LEFT JOIN (
+                           SELECT service_id, SUM(quantity * unit_price) as parts_total
+                           FROM service_parts
+                           GROUP BY service_id
+                         ) sp ON s.id = sp.service_id
+                         WHERE s.status = 'completed' AND YEAR(s.service_date) = ?
+                         
                          UNION ALL
+                         
+                         -- Expense invoices
                          SELECT created_at as date_col, amount
                          FROM invoices WHERE invoice_type = 'expense' AND status = 'paid' AND YEAR(created_at) = ?
                        ) combined
                        GROUP BY MONTH(combined.date_col)`;
+      
       incomeParams = [targetYear];
       expenseParams = [targetYear, targetYear];
 
     } else if (period === 'week') {
       // Weekly: weeks of selected month/year
       const targetMonth = month || new Date().getMonth() + 1;
+      
       incomeQuery = `SELECT WEEK(created_at) as period, COALESCE(SUM(amount), 0) as total 
                       FROM invoices 
                       WHERE status = 'paid' 
                       AND (invoice_type = 'income' OR invoice_type IS NULL)
                       AND YEAR(created_at) = ? AND MONTH(created_at) = ? 
                       GROUP BY WEEK(created_at)`;
-      expenseQuery = `SELECT WEEK(combined.date_col) as period, COALESCE(SUM(combined.amount), 0) as total
+      
+      expenseQuery = `SELECT 
+                        WEEK(combined.date_col) as period, 
+                        COALESCE(SUM(combined.amount), 0) as total
                        FROM (
-                         SELECT service_date as date_col, labor_cost as amount
-                         FROM services WHERE status = 'completed' AND YEAR(service_date) = ? AND MONTH(service_date) = ?
+                         SELECT 
+                           s.service_date as date_col,
+                           (CASE WHEN u.role = 'admin' THEN 0 ELSE s.labor_cost END + COALESCE(sp.parts_total, 0)) as amount
+                         FROM services s
+                         LEFT JOIN users u ON s.mechanic_id = u.id
+                         LEFT JOIN (
+                           SELECT service_id, SUM(quantity * unit_price) as parts_total
+                           FROM service_parts
+                           GROUP BY service_id
+                         ) sp ON s.id = sp.service_id
+                         WHERE s.status = 'completed' AND YEAR(s.service_date) = ? AND MONTH(s.service_date) = ?
+                         
                          UNION ALL
+                         
                          SELECT created_at as date_col, amount
                          FROM invoices WHERE invoice_type = 'expense' AND status = 'paid' AND YEAR(created_at) = ? AND MONTH(created_at) = ?
                        ) combined
                        GROUP BY WEEK(combined.date_col)`;
+      
       incomeParams = [targetYear, targetMonth];
       expenseParams = [targetYear, targetMonth, targetYear, targetMonth];
 
@@ -239,15 +282,30 @@ router.get('/analytics', authenticate, authorizeEntity('dashboard'), async (req,
                       AND (invoice_type = 'income' OR invoice_type IS NULL)
                       AND created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
                       GROUP BY DATE_FORMAT(created_at, '%Y-%m')`;
-      expenseQuery = `SELECT DATE_FORMAT(combined.date_col, '%Y-%m') as period, COALESCE(SUM(combined.amount), 0) as total
+      
+      expenseQuery = `SELECT 
+                        DATE_FORMAT(combined.date_col, '%Y-%m') as period, 
+                        COALESCE(SUM(combined.amount), 0) as total
                        FROM (
-                         SELECT service_date as date_col, labor_cost as amount
-                         FROM services WHERE status = 'completed' AND service_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+                         SELECT 
+                           s.service_date as date_col,
+                           (CASE WHEN u.role = 'admin' THEN 0 ELSE s.labor_cost END + COALESCE(sp.parts_total, 0)) as amount
+                         FROM services s
+                         LEFT JOIN users u ON s.mechanic_id = u.id
+                         LEFT JOIN (
+                           SELECT service_id, SUM(quantity * unit_price) as parts_total
+                           FROM service_parts
+                           GROUP BY service_id
+                         ) sp ON s.id = sp.service_id
+                         WHERE s.status = 'completed' AND s.service_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+                         
                          UNION ALL
+                         
                          SELECT created_at as date_col, amount
                          FROM invoices WHERE invoice_type = 'expense' AND status = 'paid' AND created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
                        ) combined
                        GROUP BY DATE_FORMAT(combined.date_col, '%Y-%m')`;
+      
       incomeParams = [];
       expenseParams = [];
     }
