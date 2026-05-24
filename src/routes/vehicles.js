@@ -1,7 +1,47 @@
 const express = require('express');
 const pool = require('../config/database');
 const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const router = express.Router();
+
+// Ensure uploads directory exists
+const uploadDir = path.join(__dirname, '..', '..', 'uploads', 'vehicles');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// Multer config
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    cb(null, 'vehicle-' + unique + ext);
+  }
+});
+
+const fileFilter = (req, file, cb) => {
+  const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+  if (allowed.includes(file.mimetype)) cb(null, true);
+  else cb(new Error('Only JPEG, PNG, WebP, GIF allowed'), false);
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+});
+
+// Upload endpoint
+router.post('/upload', authenticate, upload.single('image'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const imageUrl = `/uploads/vehicles/${req.file.filename}`;
+  res.json({ image_url: imageUrl, message: 'Image uploaded' });
+});
 
 router.get('/', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
@@ -16,7 +56,6 @@ router.get('/', authenticate, authorizeEntity('vehicles'), async (req, res) => {
        LEFT JOIN users u ON v.assigned_to = u.id 
        ORDER BY v.created_at DESC`
     );
-    // service_status can be: 'confirmed', 'scheduled', or null
     res.json(vehicles);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch vehicles' });
@@ -146,6 +185,13 @@ router.put('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicl
 
 router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.delete']), async (req, res) => {
   try {
+    // Delete associated image if exists
+    const [vehicles] = await pool.execute('SELECT image_url FROM vehicles WHERE id = ?', [req.params.id]);
+    if (vehicles[0]?.image_url?.startsWith('/uploads/')) {
+      const imgPath = path.join(__dirname, '..', '..', vehicles[0].image_url);
+      if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath);
+    }
+    
     await pool.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
     res.json({ message: 'Vehicle deleted successfully' });
   } catch (error) {
