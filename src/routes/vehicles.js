@@ -7,21 +7,17 @@ router.get('/', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
     const [vehicles] = await pool.execute(
       `SELECT v.*, u.name as assigned_name,
-        EXISTS(
-          SELECT 1 FROM services s 
-          WHERE s.vehicle_id = v.id 
-          AND s.status IN ('scheduled', 'confirmed')
-        ) as on_service
+        (SELECT s.status FROM services s 
+         WHERE s.vehicle_id = v.id 
+         AND s.status IN ('scheduled', 'confirmed')
+         ORDER BY s.service_date ASC
+         LIMIT 1) as service_status
        FROM vehicles v 
        LEFT JOIN users u ON v.assigned_to = u.id 
        ORDER BY v.created_at DESC`
     );
-    // MySQL returns EXISTS as 1/0 — convert to boolean for cleaner frontend handling
-    const enriched = vehicles.map(v => ({
-      ...v,
-      on_service: v.on_service === 1
-    }));
-    res.json(enriched);
+    // service_status can be: 'confirmed', 'scheduled', or null
+    res.json(vehicles);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch vehicles' });
   }
