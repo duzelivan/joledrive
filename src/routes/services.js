@@ -3,6 +3,23 @@ const pool = require('../config/database');
 const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
+// Helper: get mechanic role for a service
+async function getMechanicRole(connection, serviceId) {
+  const [rows] = await connection.execute(
+    'SELECT s.mechanic_id, u.role FROM services s LEFT JOIN users u ON s.mechanic_id = u.id WHERE s.id = ?',
+    [serviceId]
+  );
+  return rows[0]?.role || 'mechanic';
+}
+
+// Helper: calculate total expense based on mechanic role
+function calculateExpense(laborCost, partsTotal, mechanicRole) {
+  // Admin: only parts count as expense (admin labor is "free" for the company)
+  // Mechanic: labor + parts count as expense
+  const effectiveLabor = mechanicRole === 'admin' ? 0 : parseFloat(laborCost || 0);
+  return effectiveLabor + partsTotal;
+}
+
 // NOVO: Dohvati SVE plaćanja mehaničaru (za prikaz u kartici)
 router.get('/mechanic-payments/all', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
@@ -97,7 +114,7 @@ router.post('/mechanic-payments/by-mechanic', authenticate, authorize(['admin'])
 
     // Provjeri mehaničara
     const [mechanicRows] = await connection.execute(
-      'SELECT id, name FROM users WHERE id = ? AND role = ?',
+      'SELECT id, name, role FROM users WHERE id = ? AND role = ?',
       [mechanic_id, 'mechanic']
     );
 
@@ -107,13 +124,14 @@ router.post('/mechanic-payments/by-mechanic', authenticate, authorize(['admin'])
       return res.status(404).json({ error: 'Mechanic not found' });
     }
 
-    // Provjeri dugovanje
+    // Provjeri dugovanje (samo rad mehaničara, ne admina)
     const [debtResult] = await connection.execute(
       `SELECT 
-        COALESCE(SUM(labor_cost), 0) as total_labor,
+        COALESCE(SUM(CASE WHEN u.role != 'admin' THEN s.labor_cost ELSE 0 END), 0) as total_labor,
         (SELECT COALESCE(SUM(amount), 0) FROM mechanic_payments WHERE mechanic_id = ?) as total_paid
-       FROM services 
-       WHERE mechanic_id = ? AND status = 'completed'`,
+       FROM services s
+       JOIN users u ON s.mechanic_id = u.id
+       WHERE s.mechanic_id = ? AND s.status = 'completed'`,
       [mechanic_id, mechanic_id]
     );
 
@@ -191,21 +209,31 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
   try {
     const { work_description, labor_cost, mileage, parts_used } = req.body;
 
-    const [serviceData] = await pool.execute(
-      'SELECT vehicle_id FROM services WHERE id = ?',
-      [req.params.id]
-    );
-
-    if (serviceData.length === 0) {
-      return res.status(404).json({ error: 'Service not found' });
-    }
-
-    const vehicleId = serviceData[0].vehicle_id;
-
     const connection = await pool.getConnection();
     await connection.beginTransaction();
 
     try {
+      const [serviceData] = await connection.execute(
+        'SELECT vehicle_id, mechanic_id FROM services WHERE id = ?',
+        [req.params.id]
+      );
+
+      if (serviceData.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ error: 'Service not found' });
+      }
+
+      const vehicleId = serviceData[0].vehicle_id;
+      const mechanicId = serviceData[0].mechanic_id;
+
+      // Get mechanic role
+      const [mechanicData] = await connection.execute(
+        'SELECT role FROM users WHERE id = ?',
+        [mechanicId]
+      );
+      const mechanicRole = mechanicData[0]?.role || 'mechanic';
+
       const [vehicleData] = await connection.execute(
         'SELECT mileage FROM vehicles WHERE id = ?',
         [vehicleId]
@@ -250,7 +278,9 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
         }
       }
 
-      const totalServiceCost = parseFloat(labor_cost || 0) + partsTotal;
+      // Admin: only parts count as expense
+      // Mechanic: labor + parts count as expense
+      const totalServiceCost = calculateExpense(labor_cost, partsTotal, mechanicRole);
 
       await connection.execute(
         'UPDATE vehicles SET total_expenses = total_expenses + ? WHERE id = ?',
@@ -262,13 +292,19 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
       );
 
       await connection.commit();
-      res.json({ message: 'Service completed successfully' });
+      connection.release();
+      
+      res.json({ 
+        message: 'Service completed successfully',
+        total_cost: totalServiceCost,
+        parts_cost: partsTotal,
+        labor_cost: mechanicRole === 'admin' ? 0 : parseFloat(labor_cost || 0)
+      });
 
     } catch (err) {
       await connection.rollback();
-      throw err;
-    } finally {
       connection.release();
+      throw err;
     }
 
   } catch (error) {
@@ -316,8 +352,11 @@ router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['ser
     }
 
     if (service.status === 'completed') {
+      // Get mechanic role to calculate correct reversal amount
+      const mechanicRole = await getMechanicRole(connection, req.params.id);
+      
       const partsTotal = partsUsed.reduce((sum, part) => sum + (part.quantity * part.unit_price), 0);
-      const totalServiceCost = parseFloat(service.labor_cost || 0) + partsTotal;
+      const totalServiceCost = calculateExpense(service.labor_cost, partsTotal, mechanicRole);
 
       await connection.execute(
         'UPDATE vehicles SET total_expenses = total_expenses - ? WHERE id = ?',
@@ -383,9 +422,12 @@ router.post('/:id/mechanic-payments', authenticate, authorizeEntity('services'),
     const { amount, payment_date, note } = req.body;
     const serviceId = req.params.id;
 
-    // Provjeri servis
+    // Provjeri servis i mehaničarovu rolu
     const [serviceRows] = await connection.execute(
-      'SELECT mechanic_id, labor_cost, vehicle_id FROM services WHERE id = ?',
+      `SELECT s.mechanic_id, s.labor_cost, s.vehicle_id, u.role 
+       FROM services s 
+       LEFT JOIN users u ON s.mechanic_id = u.id
+       WHERE s.id = ?`,
       [serviceId]
     );
 
@@ -403,6 +445,9 @@ router.post('/:id/mechanic-payments', authenticate, authorizeEntity('services'),
       return res.status(400).json({ error: 'No mechanic assigned to this service' });
     }
 
+    // Admin services have no mechanic debt (labor_cost = 0 for debt calc)
+    const effectiveLaborCost = service.role === 'admin' ? 0 : parseFloat(service.labor_cost || 0);
+
     // Provjeri da uplata ne prelazi dugovanje za ovaj servis
     const [servicePaymentsResult] = await connection.execute(
       `SELECT COALESCE(SUM(amount), 0) as total_paid 
@@ -412,8 +457,7 @@ router.post('/:id/mechanic-payments', authenticate, authorizeEntity('services'),
     );
 
     const alreadyPaid = parseFloat(servicePaymentsResult[0].total_paid);
-    const laborCost = parseFloat(service.labor_cost || 0);
-    const remainingForService = laborCost - alreadyPaid;
+    const remainingForService = effectiveLaborCost - alreadyPaid;
 
     if (parseFloat(amount) > remainingForService) {
       await connection.rollback();
@@ -467,10 +511,31 @@ router.delete('/mechanic-payments/:paymentId', authenticate, authorize(['admin']
   }
 });
 
-// Endpoint za ukupno dugovanje mehaničaru
+// Endpoint za ukupno dugovanje mehaničaru (samo za mehaničare, ne admine)
 router.get('/mechanic-debt/:mechanicId', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const mechanicId = req.params.mechanicId;
+
+    // Provjeri je li korisnik mehaničar (ne admin)
+    const [userCheck] = await pool.execute(
+      'SELECT role FROM users WHERE id = ?',
+      [mechanicId]
+    );
+
+    if (userCheck.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Ako je admin, vrati 0 dugovanje (admin nema labor debt)
+    if (userCheck[0].role === 'admin') {
+      return res.json({
+        mechanic_id: mechanicId,
+        total_labor: 0,
+        total_paid: 0,
+        remaining_debt: 0,
+        note: 'Admin has no labor debt'
+      });
+    }
 
     const [laborResult] = await pool.execute(
       `SELECT COALESCE(SUM(labor_cost), 0) as total_labor 
