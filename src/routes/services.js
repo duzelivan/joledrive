@@ -91,10 +91,25 @@ router.get('/:id', authenticate, authorizeEntity('services'), async (req, res) =
       [req.params.id]
     );
 
-    // Izračunaj ukupne troškove (rad + dijelovi)
+    // Get mechanic role
+    let mechanicRole = 'mechanic';
+    if (service.mechanic_id) {
+      const [mechanicData] = await pool.execute('SELECT role FROM users WHERE id = ?', [service.mechanic_id]);
+      mechanicRole = mechanicData[0]?.role || 'mechanic';
+    }
+
+    // Calculate costs
     const partsTotal = parts.reduce((sum, part) => sum + (part.quantity * part.unit_price), 0);
     const laborCost = parseFloat(service.labor_cost || 0);
+    
+    // Puni trošak (labor + parts) - informativno
     service.total_cost = laborCost + partsTotal;
+    
+    // Effective trošak koji ide u obračun (admin = samo dijelovi, mech = rad + dijelovi)
+    service.effective_cost = calculateExpense(service.labor_cost, partsTotal, mechanicRole);
+    service.parts_total = partsTotal;
+    service.labor_counted = mechanicRole === 'admin' ? 0 : laborCost;
+    service.mechanic_role = mechanicRole;
     service.parts_used = parts;
 
     res.json(service);
