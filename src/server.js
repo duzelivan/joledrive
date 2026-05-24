@@ -8,7 +8,7 @@ require('dotenv').config();
 
 const app = express();
 
-// ⚠️ KLJUČNO: Trust proxy PRIJE helmet i rateLimit
+// Trust proxy (Railway)
 app.set('trust proxy', 1);
 
 // Security middleware
@@ -21,9 +21,10 @@ app.use(cors({
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 200,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.path === '/health' || req.path === '/',
 });
 app.use(limiter);
 
@@ -33,12 +34,20 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Static files for uploads
 app.use('/uploads', express.static('uploads'));
 
-// Health check
+// ============================================
+// HEALTH CHECKS
+// ============================================
+app.get('/', (req, res) => {
+  res.json({ status: 'JoleDrive API is running', timestamp: new Date().toISOString() });
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Routes
+// ============================================
+// ROUTES
+// ============================================
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/vehicles', require('./routes/vehicles'));
@@ -55,6 +64,7 @@ app.use('/api/vehicle-assignments', require('./routes/vehicleAssignments'));
 // CRON - Automatske dnevne obavijesti
 // ============================================
 const { sendEmail } = require('./utils/email');
+const { authenticate } = require('./middleware/auth');
 
 async function getNotificationEmails() {
   const [rows] = await pool.execute(
@@ -67,7 +77,7 @@ async function getNotificationEmails() {
 
 async function sendDailyNotifications() {
   try {
-    console.log('[' + new Date().toISOString() + '] Pokrećem dnevne obavijesti...');
+    console.log(`[${new Date().toISOString()}] Pokrećem dnevne obavijesti...`);
     
     const today = new Date().toISOString().split('T')[0];
     const thirtyDaysLater = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -82,7 +92,7 @@ async function sendDailyNotifications() {
 
     const notificationEmails = await getNotificationEmails();
     if (notificationEmails.length === 0) {
-      console.log('Nema konfiguriranih emailova za obavijesti');
+      console.log('[CRON] Nema konfiguriranih emailova za obavijesti');
       return;
     }
 
@@ -90,94 +100,95 @@ async function sendDailyNotifications() {
     let skipped = 0;
 
     for (const vehicle of vehicles) {
-      const [existing] = await pool.execute(
-        `SELECT id FROM notification_logs WHERE vehicle_id = ? AND DATE(sent_at) = CURDATE()`,
-        [vehicle.id]
-      );
-      
-      if (existing.length > 0) {
-        skipped++;
-        continue;
-      }
-
-      let alerts = [];
-      const regDate = new Date(vehicle.registration_date);
-      const yellowDate = new Date(vehicle.yellow_card_date);
-      const ppDate = new Date(vehicle.pp_apparatus_date);
-      const now = new Date();
-
-      if (regDate <= now) alerts.push(`Registracija ISTEKLA (${vehicle.registration_date})`);
-      else if (regDate <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)) {
-        const days = Math.ceil((regDate - now) / (1000 * 60 * 60 * 24));
-        alerts.push(`Registracija ističe za ${days} dana`);
-      }
-
-      if (yellowDate <= now) alerts.push(`Žuti karton ISTEKAO (${vehicle.yellow_card_date})`);
-      else if (yellowDate <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)) {
-        const days = Math.ceil((yellowDate - now) / (1000 * 60 * 60 * 24));
-        alerts.push(`Žuti karton ističe za ${days} dana`);
-      }
-
-      if (ppDate <= now) alerts.push(`PP aparat ISTEKAO (${vehicle.pp_apparatus_date})`);
-      else if (ppDate <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)) {
-        const days = Math.ceil((ppDate - now) / (1000 * 60 * 60 * 24));
-        alerts.push(`PP aparat ističe za ${days} dana`);
-      }
-
-      if (alerts.length === 0) continue;
-
-      const result = await sendEmail(
-        notificationEmails,
-        `JoleDrive - Obavijest za ${vehicle.manufacturer} ${vehicle.model}`,
-        `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #dc2626;">🔔 JoleDrive Obavijest</h2>
-            <p>Poštovani,</p>
-            <p>Sljedeće stavke zahtijevaju pažnju za vozilo:</p>
-            
-            <div style="background: #f3f4f6; padding: 16px; border-radius: 8px; margin: 16px 0;">
-              <h3 style="margin-top: 0; color: #1f2937;">
-                ${vehicle.manufacturer} ${vehicle.model}
-                <span style="color: #6b7280; font-size: 14px;">(${vehicle.license_plate || '---'})</span>
-              </h3>
-              ${vehicle.assigned_name ? `<p><strong>Zadužio:</strong> ${vehicle.assigned_name}</p>` : ''}
-              <ul style="color: #dc2626;">
-                ${alerts.map(a => `<li>${a}</li>`).join('')}
-              </ul>
-            </div>
-            
-            <p style="font-size: 12px; color: #6b7280; margin-top: 24px;">
-              JoleDrive d.o.o - Evidencija vozila<br>
-              Ova obavijest je automatski generirana.
-            </p>
-          </div>
-        `
-      );
-
-      if (result.success) {
-        sent++;
-        await pool.execute(
-          'INSERT INTO notification_logs (vehicle_id, sent_at, alerts) VALUES (?, NOW(), ?)',
-          [vehicle.id, JSON.stringify(alerts)]
+      try {
+        const [existing] = await pool.execute(
+          `SELECT id FROM notification_logs WHERE vehicle_id = ? AND DATE(sent_at) = CURDATE()`,
+          [vehicle.id]
         );
+        
+        if (existing.length > 0) {
+          skipped++;
+          continue;
+        }
+
+        let alerts = [];
+        const now = new Date();
+
+        const checkDate = (dateStr, label) => {
+          if (!dateStr) return;
+          const date = new Date(dateStr);
+          if (isNaN(date)) return;
+          if (date <= now) alerts.push(`${label} ISTEKAO (${dateStr})`);
+          else if (date <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)) {
+            const days = Math.ceil((date - now) / (1000 * 60 * 60 * 24));
+            alerts.push(`${label} ističe za ${days} dana`);
+          }
+        };
+
+        checkDate(vehicle.registration_date, 'Registracija');
+        checkDate(vehicle.yellow_card_date, 'Žuti karton');
+        checkDate(vehicle.pp_apparatus_date, 'PP aparat');
+
+        if (alerts.length === 0) continue;
+
+        const result = await sendEmail(
+          notificationEmails,
+          `JoleDrive - Obavijest za ${vehicle.manufacturer} ${vehicle.model}`,
+          `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              <h2 style="color: #dc2626;">JoleDrive Obavijest</h2>
+              <p>Poštovani,</p>
+              <p>Sljedeće stavke zahtijevaju pažnju za vozilo:</p>
+              
+              <div style="background: #f3f4f6; padding: 16px; border-radius: 8px; margin: 16px 0;">
+                <h3 style="margin-top: 0; color: #1f2937;">
+                  ${vehicle.manufacturer} ${vehicle.model}
+                  <span style="color: #6b7280; font-size: 14px;">(${vehicle.license_plate || '---'})</span>
+                </h3>
+                ${vehicle.assigned_name ? `<p><strong>Zadužio:</strong> ${vehicle.assigned_name}</p>` : ''}
+                <ul style="color: #dc2626;">
+                  ${alerts.map(a => `<li>${a}</li>`).join('')}
+                </ul>
+              </div>
+              
+              <p style="font-size: 12px; color: #6b7280; margin-top: 24px;">
+                JoleDrive d.o.o - Evidencija vozila<br>
+                Ova obavijest je automatski generirana.
+              </p>
+            </div>
+          `
+        );
+
+        if (result && result.success) {
+          sent++;
+          await pool.execute(
+            'INSERT INTO notification_logs (vehicle_id, sent_at, alerts) VALUES (?, NOW(), ?)',
+            [vehicle.id, JSON.stringify(alerts)]
+          );
+        }
+      } catch (vehicleErr) {
+        console.error(`[CRON] Greška za vozilo ${vehicle.id}:`, vehicleErr.message);
       }
     }
 
     console.log(`[${new Date().toISOString()}] Završeno: ${sent} poslano, ${skipped} preskočeno`);
 
   } catch (error) {
-    console.error('Greška u dnevnim obavijestima:', error);
+    console.error('[CRON] Greška u dnevnim obavijestima:', error.message);
   }
 }
 
-// TEST ENDPOINT - ručno pokreni obavijesti
-app.get('/test-notifications', async (req, res) => {
+// TEST ENDPOINT - zaštićen autentikacijom (samo admin)
+app.get('/test-notifications', authenticate, async (req, res) => {
   try {
-    console.log('Test notifications triggered manually');
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin only' });
+    }
+    console.log(`[TEST] Notifications triggered by user ${req.user.id}`);
     await sendDailyNotifications();
     res.json({ success: true, message: 'Notifications sent - check logs' });
   } catch (error) {
-    console.error('Test error:', error);
+    console.error('[TEST] Error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -191,14 +202,59 @@ console.log('Cron postavljen: Svakog dana u 9:00 šalje obavijesti');
 
 // Error handling
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error(`[ERROR] ${req.method} ${req.path}:`, err.message);
   res.status(500).json({ error: 'Internal server error' });
 });
 
 // ============================================
-// START SERVER
+// START SERVER + GRACEFUL SHUTDOWN
 // ============================================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+
+const server = app.listen(PORT, () => {
   console.log(`JoleDrive API running on port ${PORT}`);
+});
+
+// Memory monitoring (svakih 60 sekundi)
+setInterval(() => {
+  const used = process.memoryUsage();
+  console.log(`[MEMORY] RSS: ${(used.rss / 1024 / 1024).toFixed(1)}MB | Heap: ${(used.heapUsed / 1024 / 1024).toFixed(1)}MB | External: ${(used.external / 1024 / 1024).toFixed(1)}MB`);
+}, 60000);
+
+// Graceful shutdown na SIGTERM (Railway restart)
+process.on('SIGTERM', () => {
+  console.log('[SIGTERM] Graceful shutdown started...');
+  
+  // Zaustavi cron da ne pokrene novi job
+  cron.getTasks().forEach(task => task.stop());
+  
+  // Zatvori HTTP server (ne primamo nove requestove)
+  server.close(() => {
+    console.log('[SIGTERM] HTTP server closed');
+    
+    // Zatvori DB pool
+    pool.end().then(() => {
+      console.log('[SIGTERM] DB pool closed');
+      process.exit(0);
+    }).catch(err => {
+      console.error('[SIGTERM] Error closing pool:', err);
+      process.exit(1);
+    });
+  });
+  
+  // Force exit nakon 10 sekundi ako nešto zaglavi
+  setTimeout(() => {
+    console.error('[SIGTERM] Forced exit after timeout');
+    process.exit(1);
+  }, 10000);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT]', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[UNHANDLED REJECTION]', reason);
 });
