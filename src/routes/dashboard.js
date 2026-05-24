@@ -8,6 +8,46 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
     const today = new Date().toISOString().split('T')[0];
     const thirtyDaysLater = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
+    // === 4 VEHICLE GROUPS (for KPI cards) ===
+    const [[serviceConfirmed]] = await pool.execute(
+      `SELECT COUNT(DISTINCT v.id) as count
+       FROM vehicles v
+       INNER JOIN services s ON v.id = s.vehicle_id
+       WHERE s.status = 'confirmed'`
+    );
+
+    const [[serviceScheduled]] = await pool.execute(
+      `SELECT COUNT(DISTINCT v.id) as count
+       FROM vehicles v
+       INNER JOIN services s ON v.id = s.vehicle_id
+       WHERE s.status = 'scheduled'`
+    );
+
+    const [[occupiedCount]] = await pool.execute(
+      `SELECT COUNT(*) as count FROM vehicles WHERE assigned_to IS NOT NULL`
+    );
+
+    const [[availableCount]] = await pool.execute(
+      `SELECT COUNT(*) as count FROM vehicles WHERE assigned_to IS NULL`
+    );
+
+    // === ACTIVE ASSIGNMENTS ===
+    const [activeAssignments] = await pool.execute(
+      `SELECT v.id, v.manufacturer, v.model, v.license_plate, v.image_url,
+        u.name as assigned_name, u.phone as assigned_phone, va.assigned_at
+       FROM vehicle_assignments va
+       JOIN vehicles v ON va.vehicle_id = v.id
+       JOIN users u ON va.user_id = u.id
+       WHERE va.returned_at IS NULL
+       ORDER BY va.assigned_at DESC
+       LIMIT 10`
+    );
+
+    const [[activeAssignmentsCount]] = await pool.execute(
+      `SELECT COUNT(*) as count FROM vehicle_assignments WHERE returned_at IS NULL`
+    );
+
+    // === NOTIFICATIONS (with days remaining) ===
     const [notifications] = await pool.execute(
       `SELECT id, manufacturer, model, license_plate, registration_date, yellow_card_date, pp_apparatus_date,
         CASE 
@@ -23,6 +63,28 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
       [today, thirtyDaysLater, today, thirtyDaysLater, today, thirtyDaysLater, thirtyDaysLater, thirtyDaysLater, thirtyDaysLater]
     );
 
+    // Enrich notifications with days remaining
+    const enrichedNotifications = notifications.map(n => {
+      let daysRemaining = null;
+      let targetDate = null;
+      
+      if (n.alert_type?.includes('REGISTRATION')) targetDate = n.registration_date;
+      else if (n.alert_type?.includes('YELLOW_CARD')) targetDate = n.yellow_card_date;
+      else if (n.alert_type?.includes('PP')) targetDate = n.pp_apparatus_date;
+
+      if (targetDate) {
+        const target = new Date(targetDate);
+        const now = new Date(today);
+        const diffTime = target - now;
+        daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      }
+
+      return { ...n, days_remaining: daysRemaining };
+    });
+
+    // Sort: expired first (negative days), then by days remaining
+    enrichedNotifications.sort((a, b) => (a.days_remaining ?? 999) - (b.days_remaining ?? 999));
+
     const [upcomingServices] = await pool.execute(
       `SELECT s.*, v.manufacturer, v.model 
        FROM services s 
@@ -34,7 +96,7 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
       [today]
     );
 
-    // ISPRAVKA: Samo prihodi (invoice_type = 'income' ili NULL)
+    // === INVOICES (only income) ===
     const [unpaidResult] = await pool.execute(`
       SELECT i.id, i.amount 
       FROM invoices i
@@ -46,7 +108,6 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
     let unpaidCount = unpaidResult.length;
     let unpaidTotal = unpaidResult.reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0);
 
-    // ISPRAVKA: Samo prihodi (partial)
     const [partialResult] = await pool.execute(`
       SELECT i.id, i.amount, SUM(p.amount) as paid
       FROM invoices i
@@ -59,7 +120,6 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
     let partialCount = partialResult.length;
     let partialTotal = partialResult.reduce((sum, inv) => sum + ((Number(inv.amount) || 0) - (Number(inv.paid) || 0)), 0);
 
-    // ISPRAVKA: Samo prihodi (paid)
     const [paidResult] = await pool.execute(`
       SELECT i.id, i.amount
       FROM invoices i
@@ -69,7 +129,6 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
       HAVING SUM(p.amount) >= i.amount
     `);
     
-    let paidCount = paidResult.length;
     let paidTotal = paidResult.reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0);
 
     const totalDue = unpaidTotal + partialTotal;
@@ -79,7 +138,7 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
 
     const totalIncome = paidTotal;
     
-    // ISPRAVKA: Troškovi uključuju i expense račune i servise
+    // === EXPENSES: completed services labor + paid expense invoices ===
     const [servicesCost] = await pool.execute(`
       SELECT COALESCE(SUM(labor_cost), 0) as total_expenses
       FROM services
@@ -95,17 +154,21 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
     const totalExpenses = parseFloat(servicesCost[0].total_expenses || 0) + parseFloat(expenseInvoices[0].total || 0);
 
     res.json({
-      notifications,
+      notifications: enrichedNotifications,
       upcomingServices,
+      activeAssignments,
       stats: {
         vehicles: Number(vehicleCount.count) || 0,
         completedServices: Number(serviceCount.count) || 0,
+        activeAssignments: Number(activeAssignmentsCount.count) || 0,
+        serviceConfirmed: Number(serviceConfirmed.count) || 0,
+        serviceScheduled: Number(serviceScheduled.count) || 0,
+        occupied: Number(occupiedCount.count) || 0,
+        available: Number(availableCount.count) || 0,
         unpaidInvoices: unpaidCount,
         unpaidTotal: unpaidTotal,
         partialInvoices: partialCount,
         partialTotal: partialTotal,
-        paidInvoices: paidCount,
-        paidTotal: paidTotal,
         totalDue: totalDue,
         totalIncome: totalIncome,
         totalExpenses: totalExpenses,
@@ -120,55 +183,77 @@ router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => 
 
 router.get('/analytics', authenticate, authorizeEntity('dashboard'), async (req, res) => {
   try {
-    const { period, year, month, week } = req.query;
+    const { period, year, month } = req.query;
+    const targetYear = year || new Date().getFullYear();
 
     let incomeQuery, expenseQuery;
-    let params = [];
+    let incomeParams = [], expenseParams = [];
 
     if (period === 'month') {
-      // ISPRAVKA: Prihodi = samo income računi
+      // Monthly: 12 months of the selected year
       incomeQuery = `SELECT MONTH(created_at) as period, COALESCE(SUM(amount), 0) as total 
                       FROM invoices 
                       WHERE status = 'paid' 
                       AND (invoice_type = 'income' OR invoice_type IS NULL)
                       AND YEAR(created_at) = ? 
                       GROUP BY MONTH(created_at)`;
-      // ISPRAVKA: Troškovi = servisi + expense računi
-      expenseQuery = `SELECT MONTH(service_date) as period, COALESCE(SUM(labor_cost), 0) as total 
-                       FROM services 
-                       WHERE status = 'completed' 
-                       AND YEAR(service_date) = ? 
-                       GROUP BY MONTH(service_date)`;
-      params = [year || new Date().getFullYear()];
+      // Expenses: services labor_cost + expense invoices
+      expenseQuery = `SELECT MONTH(combined.date_col) as period, COALESCE(SUM(combined.amount), 0) as total
+                       FROM (
+                         SELECT service_date as date_col, labor_cost as amount
+                         FROM services WHERE status = 'completed' AND YEAR(service_date) = ?
+                         UNION ALL
+                         SELECT created_at as date_col, amount
+                         FROM invoices WHERE invoice_type = 'expense' AND status = 'paid' AND YEAR(created_at) = ?
+                       ) combined
+                       GROUP BY MONTH(combined.date_col)`;
+      incomeParams = [targetYear];
+      expenseParams = [targetYear, targetYear];
+
     } else if (period === 'week') {
+      // Weekly: weeks of selected month/year
+      const targetMonth = month || new Date().getMonth() + 1;
       incomeQuery = `SELECT WEEK(created_at) as period, COALESCE(SUM(amount), 0) as total 
                       FROM invoices 
                       WHERE status = 'paid' 
                       AND (invoice_type = 'income' OR invoice_type IS NULL)
                       AND YEAR(created_at) = ? AND MONTH(created_at) = ? 
                       GROUP BY WEEK(created_at)`;
-      expenseQuery = `SELECT WEEK(service_date) as period, COALESCE(SUM(labor_cost), 0) as total 
-                       FROM services 
-                       WHERE status = 'completed' 
-                       AND YEAR(service_date) = ? AND MONTH(service_date) = ? 
-                       GROUP BY WEEK(service_date)`;
-      params = [year || new Date().getFullYear(), month || new Date().getMonth() + 1];
+      expenseQuery = `SELECT WEEK(combined.date_col) as period, COALESCE(SUM(combined.amount), 0) as total
+                       FROM (
+                         SELECT service_date as date_col, labor_cost as amount
+                         FROM services WHERE status = 'completed' AND YEAR(service_date) = ? AND MONTH(service_date) = ?
+                         UNION ALL
+                         SELECT created_at as date_col, amount
+                         FROM invoices WHERE invoice_type = 'expense' AND status = 'paid' AND YEAR(created_at) = ? AND MONTH(created_at) = ?
+                       ) combined
+                       GROUP BY WEEK(combined.date_col)`;
+      incomeParams = [targetYear, targetMonth];
+      expenseParams = [targetYear, targetMonth, targetYear, targetMonth];
+
     } else {
+      // Default: last 12 months
       incomeQuery = `SELECT DATE_FORMAT(created_at, '%Y-%m') as period, COALESCE(SUM(amount), 0) as total 
                       FROM invoices 
                       WHERE status = 'paid' 
                       AND (invoice_type = 'income' OR invoice_type IS NULL)
                       AND created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
                       GROUP BY DATE_FORMAT(created_at, '%Y-%m')`;
-      expenseQuery = `SELECT DATE_FORMAT(service_date, '%Y-%m') as period, COALESCE(SUM(labor_cost), 0) as total 
-                       FROM services 
-                       WHERE status = 'completed' 
-                       AND service_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
-                       GROUP BY DATE_FORMAT(service_date, '%Y-%m')`;
+      expenseQuery = `SELECT DATE_FORMAT(combined.date_col, '%Y-%m') as period, COALESCE(SUM(combined.amount), 0) as total
+                       FROM (
+                         SELECT service_date as date_col, labor_cost as amount
+                         FROM services WHERE status = 'completed' AND service_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+                         UNION ALL
+                         SELECT created_at as date_col, amount
+                         FROM invoices WHERE invoice_type = 'expense' AND status = 'paid' AND created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
+                       ) combined
+                       GROUP BY DATE_FORMAT(combined.date_col, '%Y-%m')`;
+      incomeParams = [];
+      expenseParams = [];
     }
 
-    const [income] = await pool.execute(incomeQuery, params);
-    const [expenses] = await pool.execute(expenseQuery, params);
+    const [income] = await pool.execute(incomeQuery, incomeParams);
+    const [expenses] = await pool.execute(expenseQuery, expenseParams);
 
     res.json({ income, expenses });
   } catch (error) {
