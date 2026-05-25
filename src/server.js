@@ -5,7 +5,6 @@ const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
 const pool = require('./config/database');
 require('dotenv').config();
-const mileageRoutes = require('./routes/mileage');
 
 const app = express();
 
@@ -60,7 +59,7 @@ app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/vehicle-assignments', require('./routes/vehicleAssignments'));
-app.use('/api/mileage', mileageRoutes);
+app.use('/api/mileage', require('./routes/mileage'));
 
 // ============================================
 // CRON - Automatske dnevne obavijesti
