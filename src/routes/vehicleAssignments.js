@@ -136,6 +136,19 @@ router.put('/:id/return', authenticate, authorizeEntity('vehicles'), authorize([
       });
     }
 
+    if (end_mileage && end_mileage > 0) {
+  await connection.execute(
+    `INSERT INTO mileage_logs (vehicle_id, recorded_date, mileage, source, notes, created_by)
+     VALUES (?, CURDATE(), ?, 'return', ?, ?)`,
+    [
+      assignment.vehicle_id,
+      end_mileage,
+      notes ? `Vraćanje: ${notes}` : `Vraćanje vozila`,
+      req.user.id
+    ]
+  );
+}
+
     // Ažuriraj zaduženje
     await connection.execute(
       `UPDATE vehicle_assignments 
