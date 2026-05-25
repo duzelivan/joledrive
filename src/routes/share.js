@@ -11,6 +11,24 @@ const shareTokens = new Map();
 const SHARE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ============================================
+// HELPER: Generiraj public URL za share
+// ============================================
+function generateShareUrl(req, token) {
+  // Koristi env var ako postoji, inače dinamicki iz requesta
+  const publicUrl = process.env.SHARE_PUBLIC_URL || process.env.PUBLIC_URL;
+  
+  if (publicUrl) {
+    // Ako je postavljen PUBLIC_URL, koristi ga (npr. https://joledrive.com)
+    return `${publicUrl}/share.php?token=${token}`;
+  }
+  
+  // Fallback: dinamicki iz requesta (Railway URL)
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  return `${protocol}://${host}/api/share/view/${token}`;
+}
+
+// ============================================
 // POST /api/share/:type/:id - Generiraj share link
 // type = 'document' | 'invoice'
 // ============================================
@@ -61,7 +79,7 @@ router.post('/:type/:id', authenticate, async (req, res) => {
     });
     
     // Generiraj URL
-    const shareUrl = `${process.env.PUBLIC_URL || 'https://joledrive.com'}/api/share/view/${token}`;
+    const shareUrl = generateShareUrl(req, token);
     
     res.json({
       success: true,
@@ -91,10 +109,17 @@ router.get('/view/:token', async (req, res) => {
       return res.status(404).send(`
         <!DOCTYPE html>
         <html>
-        <head><meta charset="utf-8"><title>Link je istekao</title></head>
-        <body style="font-family:Arial,sans-serif;text-align:center;padding:50px;">
-          <h2>🔗 Link nije važeći ili je istekao</h2>
-          <p>Zatražite od pošiljatelja novi link.</p>
+        <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Link je istekao</title>
+        <style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#f3f4f6;display:flex;align-items:center;justify-content:center;min-height:100vh;}
+        .box{background:white;padding:40px;border-radius:16px;text-align:center;box-shadow:0 4px 6px rgba(0,0,0,0.1);max-width:400px;margin:20px;}
+        .icon{font-size:48px;margin-bottom:16px;}h2{color:#1f2937;margin-bottom:8px;}p{color:#6b7280;}</style>
+        </head>
+        <body>
+          <div class="box">
+            <div class="icon">🔗</div>
+            <h2>Link nije važeći ili je istekao</h2>
+            <p>Zatražite od pošiljatelja novi link.</p>
+          </div>
         </body>
         </html>
       `);
@@ -106,10 +131,17 @@ router.get('/view/:token', async (req, res) => {
       return res.status(410).send(`
         <!DOCTYPE html>
         <html>
-        <head><meta charset="utf-8"><title>Link je istekao</title></head>
-        <body style="font-family:Arial,sans-serif;text-align:center;padding:50px;">
-          <h2>⏰ Link je istekao</h2>
-          <p>Ovaj link je bio važeći 7 dana. Zatražite novi.</p>
+        <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Link je istekao</title>
+        <style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#f3f4f6;display:flex;align-items:center;justify-content:center;min-height:100vh;}
+        .box{background:white;padding:40px;border-radius:16px;text-align:center;box-shadow:0 4px 6px rgba(0,0,0,0.1);max-width:400px;margin:20px;}
+        .icon{font-size:48px;margin-bottom:16px;}h2{color:#1f2937;margin-bottom:8px;}p{color:#6b7280;}</style>
+        </head>
+        <body>
+          <div class="box">
+            <div class="icon">⏰</div>
+            <h2>Link je istekao</h2>
+            <p>Ovaj link je bio važeći 7 dana. Zatražite novi.</p>
+          </div>
         </body>
         </html>
       `);
