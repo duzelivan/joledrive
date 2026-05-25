@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
 const pool = require('./config/database');
 require('dotenv').config();
+const mileageRoutes = require('./routes/mileage');
 
 const app = express();
 
