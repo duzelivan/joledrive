@@ -13,7 +13,7 @@ async function getUserWithParsedFields(userId) {
   const [users] = await pool.execute(
     `SELECT id, name, email, role, type, phone, driver_license, 
             address, oib, company_name, company_oib, 
-            entities, permissions, created_at 
+            active, entities, permissions, created_at 
      FROM users WHERE id = ?`,
     [userId]
   );
@@ -25,6 +25,14 @@ async function getUserWithParsedFields(userId) {
   }
   if (user.permissions && typeof user.permissions === 'string') {
     try { user.permissions = JSON.parse(user.permissions); } catch { user.permissions = {}; }
+  }
+  // active je BIT(1) u MySQL, može se vratiti kao Buffer
+  if (user.active !== undefined && user.active !== null) {
+    if (Buffer.isBuffer(user.active)) {
+      user.active = user.active[0] === 1;
+    } else {
+      user.active = Boolean(user.active);
+    }
   }
   return user;
 }
@@ -45,17 +53,25 @@ router.get('/', authenticate, authorizeEntity('users'), async (req, res) => {
     const [users] = await pool.execute(
       `SELECT id, name, email, role, type, phone, driver_license, 
               address, oib, company_name, company_oib, 
-              entities, permissions, created_at 
+              active, entities, permissions, created_at 
        FROM users ORDER BY created_at DESC`
     );
 
-    // Parsiraj JSON polja za svakog korisnika
+    // Parsiraj JSON polja za svakog korisnika i konvertiraj active
     const parsedUsers = users.map(u => {
       if (u.entities && typeof u.entities === 'string') {
         try { u.entities = JSON.parse(u.entities); } catch { u.entities = {}; }
       }
       if (u.permissions && typeof u.permissions === 'string') {
         try { u.permissions = JSON.parse(u.permissions); } catch { u.permissions = {}; }
+      }
+      // BIT(1) -> boolean konverzija
+      if (u.active !== undefined && u.active !== null) {
+        if (Buffer.isBuffer(u.active)) {
+          u.active = u.active[0] === 1;
+        } else {
+          u.active = Boolean(u.active);
+        }
       }
       // Ne vraćaj password hash
       delete u.password;
@@ -86,7 +102,7 @@ router.post('/', authenticate, authorizeEntity('users'), authorize(['users.creat
   try {
     const { name, email, password, role, type, phone, driver_license, 
             address, oib, company_name, company_oib, 
-            entities, permissions } = req.body;
+            entities, permissions, active } = req.body;
 
     // Validacija obaveznih polja
     if (!name || !email) {
@@ -106,12 +122,13 @@ router.post('/', authenticate, authorizeEntity('users'), authorize(['users.creat
 
     const [result] = await pool.execute(
       `INSERT INTO users (name, email, password, role, type, phone, driver_license,
-        address, oib, company_name, company_oib, entities, permissions, created_by) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        address, oib, company_name, company_oib, active, entities, permissions, created_by) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name, email, hashedPassword, role || 'user', type || 'user',
         phone || null, driver_license || null, address || null, oib || null,
         company_name || null, company_oib || null,
+        active !== undefined ? active : true,
         serializeField(entities), serializeField(permissions),
         req.user.id
       ]
@@ -136,7 +153,7 @@ router.put('/:id', authenticate, authorizeEntity('users'), authorize(['users.edi
   try {
     const { name, email, role, type, phone, driver_license, 
             address, oib, company_name, company_oib, 
-            entities, permissions, password } = req.body;
+            entities, permissions, active, password } = req.body;
 
     // Ne dopustiti uređivanje vlastitog računa osim za admina
     if (parseInt(req.params.id) === req.user.id && req.user.role !== 'admin') {
@@ -164,6 +181,7 @@ router.put('/:id', authenticate, authorizeEntity('users'), authorize(['users.edi
     if (oib !== undefined) { updates.push('oib = ?'); values.push(oib || null); }
     if (company_name !== undefined) { updates.push('company_name = ?'); values.push(company_name || null); }
     if (company_oib !== undefined) { updates.push('company_oib = ?'); values.push(company_oib || null); }
+    if (active !== undefined) { updates.push('active = ?'); values.push(active); }
     if (entities !== undefined) { updates.push('entities = ?'); values.push(serializeField(entities)); }
     if (permissions !== undefined) { updates.push('permissions = ?'); values.push(serializeField(permissions)); }
 
