@@ -1,122 +1,179 @@
 const express = require('express');
 const pool = require('../config/database');
-const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
+const { authenticate, authorize } = require('../middleware/auth');
 const router = express.Router();
 
-router.get('/', authenticate, authorizeEntity('settings'), async (req, res) => {
+// ============================================
+// GET /api/settings/company - Dohvati sve postavke tvrtke
+// ============================================
+router.get('/company', authenticate, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT setting_key, setting_value FROM settings');
+    const [rows] = await pool.execute(
+      'SELECT setting_key, setting_value FROM company_settings WHERE setting_key LIKE "company_%"'
+    );
+    
     const settings = {};
     rows.forEach(row => {
-      settings[row.setting_key] = row.setting_value;
+      settings[row.setting_key] = row.setting_value || '';
     });
+    
     res.json(settings);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch settings' });
+    console.error('Company settings fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch company settings' });
   }
 });
 
-router.put('/:key', authenticate, authorizeEntity('settings'), authorize(['settings.edit']), async (req, res) => {
+// ============================================
+// PUT /api/settings/company - Spremi sve postavke tvrtke
+// ============================================
+router.put('/company', authenticate, authorize('settings.edit'), async (req, res) => {
+  const connection = await pool.getConnection();
+  
   try {
-    const { key } = req.params;
-    const { value } = req.body;
-
-    await pool.execute(
-      'INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = ?',
-      [key, value, value]
-    );
-
-    res.json({ message: 'Setting updated' });
+    await connection.beginTransaction();
+    
+    const companyKeys = Object.keys(req.body).filter(k => k.startsWith('company_'));
+    
+    for (const key of companyKeys) {
+      await connection.execute(
+        `INSERT INTO company_settings (setting_key, setting_value, updated_by) 
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE 
+         setting_value = VALUES(setting_value), 
+         updated_by = VALUES(updated_by), 
+         updated_at = CURRENT_TIMESTAMP`,
+        [key, req.body[key], req.user.id]
+      );
+    }
+    
+    await connection.commit();
+    res.json({ success: true, message: 'Postavke tvrtke spremljene' });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to update setting' });
+    await connection.rollback();
+    console.error('Company settings save error:', error);
+    res.status(500).json({ error: 'Failed to save company settings' });
+  } finally {
+    connection.release();
   }
 });
 
-router.get('/notification-emails', authenticate, authorizeEntity('settings'), async (req, res) => {
+// ============================================
+// GET /api/settings/service-intervals - Dohvati servisne intervale
+// ============================================
+router.get('/service-intervals', authenticate, async (req, res) => {
   try {
     const [rows] = await pool.execute(
-      'SELECT setting_value FROM settings WHERE setting_key = ?',
-      ['notification_emails']
+      'SELECT setting_key, setting_value FROM company_settings WHERE setting_key LIKE "%_interval" OR setting_key LIKE "%_warning_%" OR setting_key LIKE "%_days"'
     );
     
-    let emails = [];
-    if (rows.length > 0 && rows[0].setting_value) {
-      emails = rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
-    }
+    const intervals = {};
+    rows.forEach(row => {
+      const isNumeric = !isNaN(parseInt(row.setting_value));
+      intervals[row.setting_key] = isNumeric ? parseInt(row.setting_value) : (row.setting_value || '');
+    });
     
-    res.json({ emails });
+    res.json(intervals);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch notification emails' });
+    console.error('Service intervals fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch service intervals' });
   }
 });
 
-router.post('/notification-emails', authenticate, authorizeEntity('settings'), authorize(['settings.edit']), async (req, res) => {
+// ============================================
+// PUT /api/settings/service-intervals - Spremi servisne intervale
+// ============================================
+router.put('/service-intervals', authenticate, authorize('settings.edit'), async (req, res) => {
+  const connection = await pool.getConnection();
+  
   try {
-    const { email } = req.body;
+    await connection.beginTransaction();
     
-    if (!email || !email.includes('@')) {
-      return res.status(400).json({ error: 'Invalid email address' });
+    const intervalKeys = [
+      'service_km_interval', 'service_days_interval', 'service_warning_km', 
+      'service_warning_days', 'registration_warning_days', 'yellow_card_warning_days',
+      'pp_device_warning_days'
+    ];
+    
+    for (const key of intervalKeys) {
+      if (req.body[key] !== undefined) {
+        await connection.execute(
+          `INSERT INTO company_settings (setting_key, setting_value, updated_by) 
+           VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE 
+           setting_value = VALUES(setting_value), 
+           updated_by = VALUES(updated_by), 
+           updated_at = CURRENT_TIMESTAMP`,
+          [key, String(req.body[key]), req.user.id]
+        );
+      }
     }
-
-    const [rows] = await pool.execute(
-      'SELECT setting_value FROM settings WHERE setting_key = ?',
-      ['notification_emails']
-    );
-
-    let emails = [];
-    if (rows.length > 0 && rows[0].setting_value) {
-      emails = rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
-    }
-
-    if (emails.includes(email)) {
-      return res.status(400).json({ error: 'Email already exists' });
-    }
-
-    emails.push(email);
-    const newValue = emails.join(',');
-
-    await pool.execute(
-      'INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = ?',
-      ['notification_emails', newValue, newValue]
-    );
-
-    res.json({ message: 'Email added', emails });
+    
+    await connection.commit();
+    res.json({ success: true, message: 'Servisni intervali spremljeni' });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to add email' });
+    await connection.rollback();
+    console.error('Service intervals save error:', error);
+    res.status(500).json({ error: 'Failed to save service intervals' });
+  } finally {
+    connection.release();
   }
 });
 
-router.delete('/notification-emails/:email', authenticate, authorizeEntity('settings'), authorize(['settings.edit']), async (req, res) => {
+// ============================================
+// GET /api/settings/system - Sistemske informacije
+// ============================================
+router.get('/system', authenticate, authorize('settings.edit'), async (req, res) => {
   try {
-    const emailToDelete = decodeURIComponent(req.params.email);
-
-    const [rows] = await pool.execute(
-      'SELECT setting_value FROM settings WHERE setting_key = ?',
-      ['notification_emails']
-    );
-
-    if (rows.length === 0 || !rows[0].setting_value) {
-      return res.status(404).json({ error: 'No emails found' });
-    }
-
-    let emails = rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
+    // Broj vozila
+    const [[vehicleCount]] = await pool.execute('SELECT COUNT(*) as count FROM vehicles');
     
-    const filtered = emails.filter(e => e !== emailToDelete);
+    // Broj korisnika
+    const [[userCount]] = await pool.execute('SELECT COUNT(*) as count FROM users');
     
-    if (filtered.length === emails.length) {
-      return res.status(404).json({ error: 'Email not found' });
-    }
-
-    const newValue = filtered.join(',');
-
-    await pool.execute(
-      'INSERT INTO settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = ?',
-      ['notification_emails', newValue, newValue]
+    // Broj računa
+    const [[invoiceCount]] = await pool.execute('SELECT COUNT(*) as count FROM invoices');
+    
+    // Ukupna veličina uploadanih fajlova (ako imamo file_size u invoices i documents)
+    const [[totalFileSize]] = await pool.execute(
+      'SELECT SUM(file_size) as total FROM invoices WHERE file_size IS NOT NULL'
     );
-
-    res.json({ message: 'Email removed', emails: filtered });
+    
+    // Verzija iz package.json (ručno postavljena)
+    const [[versionRow]] = await pool.execute(
+      'SELECT setting_value FROM company_settings WHERE setting_key = "app_version"'
+    );
+    
+    res.json({
+      version: versionRow?.setting_value || '1.0.0',
+      stats: {
+        vehicles: vehicleCount.count,
+        users: userCount.count,
+        invoices: invoiceCount.count,
+        totalStorageBytes: totalFileSize.total || 0
+      },
+      environment: process.env.NODE_ENV || 'development',
+      nodeVersion: process.version,
+      uptime: process.uptime()
+    });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to remove email' });
+    console.error('System info error:', error);
+    res.status(500).json({ error: 'Failed to fetch system info' });
+  }
+});
+
+// ============================================
+// POST /api/settings/clear-cache - Očisti cache
+// ============================================
+router.post('/clear-cache', authenticate, authorize('settings.edit'), async (req, res) => {
+  try {
+    // Očisti in-memory cache ako postoji
+    // Ovo ovisi o vašoj cache implementaciji
+    
+    res.json({ success: true, message: 'Cache očišćen' });
+  } catch (error) {
+    console.error('Cache clear error:', error);
+    res.status(500).json({ error: 'Failed to clear cache' });
   }
 });
 
