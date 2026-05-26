@@ -3,19 +3,6 @@ const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 
-router.get('/', authenticate, authorizeEntity('settings'), async (req, res) => {
-  try {
-    const [rows] = await pool.execute('SELECT setting_key, setting_value FROM settings');
-    const settings = {};
-    rows.forEach(row => {
-      settings[row.setting_key] = row.setting_value;
-    });
-    res.json(settings);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch settings' });
-  }
-});
-
 // ============================================
 // HELPERS
 // ============================================
@@ -25,21 +12,55 @@ const canEdit = (req) => isAdmin(req) || req.user?.permissions?.['settings.edit'
 // ============================================
 // GET /api/settings/notification-emails
 // ============================================
-router.get('/notification-emails', authenticate, authorizeEntity('settings'), async (req, res) => {
+router.get('/notification-emails', authenticate, async (req, res) => {
   try {
-    const [rows] = await pool.execute(
-      'SELECT setting_value FROM settings WHERE setting_key = ?',
-      ['notification_emails']
-    );
-    
     let emails = [];
-    if (rows.length > 0 && rows[0].setting_value) {
-      emails = rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
+    let source = 'none';
+
+    // Pokušaj 1: Zasebna tablica notification_emails (stari backend)
+    try {
+      const [rows] = await pool.execute('SELECT email FROM notification_emails ORDER BY id');
+      if (rows.length > 0) {
+        emails = rows.map(r => r.email);
+        source = 'notification_emails table';
+      }
+    } catch (e) {
+      // Tablica ne postoji — ignoriraj
     }
-    
+
+    // Pokušaj 2: company_settings (novi backend)
+    if (emails.length === 0) {
+      try {
+        const [rows] = await pool.execute(
+          'SELECT setting_value FROM company_settings WHERE setting_key = ?',
+          ['notification_emails']
+        );
+        if (rows[0]?.setting_value) {
+          try {
+            const parsed = JSON.parse(rows[0].setting_value);
+            if (Array.isArray(parsed)) {
+              emails = parsed;
+              source = 'company_settings JSON';
+            }
+          } catch (e) {
+            // Nije validan JSON — možda je plain string
+            const val = rows[0].setting_value;
+            if (val.includes('@')) {
+              emails = [val];
+              source = 'company_settings string';
+            }
+          }
+        }
+      } catch (e) {
+        // Ignoriraj
+      }
+    }
+
+    console.log(`[EMAILS] GET: ${emails.length} emailova iz ${source}`);
     res.json({ emails });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch notification emails' });
+    console.error('Fetch emails error:', error);
+    res.status(500).json({ error: 'Failed to fetch emails' });
   }
 });
 
@@ -55,23 +76,49 @@ router.post('/notification-emails', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Valid email required' });
     }
 
-    const [rows] = await pool.execute(
-      'SELECT setting_value FROM company_settings WHERE setting_key = "notification_emails"'
-    );
-    const emails = rows[0]?.setting_value ? JSON.parse(rows[0].setting_value) : [];
-    
+    let emails = [];
+    let useTable = false;
+
+    // Pokušaj 1: Zasebna tablica
+    try {
+      const [existing] = await pool.execute('SELECT email FROM notification_emails');
+      emails = existing.map(r => r.email);
+      useTable = true;
+    } catch (e) {
+      // Tablica ne postoji
+    }
+
     if (emails.includes(email)) {
       return res.status(400).json({ error: 'Email already exists' });
     }
-    
-    emails.push(email);
-    
-    await pool.execute(
-      `INSERT INTO company_settings (setting_key, setting_value) 
-       VALUES ("notification_emails", ?)
-       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
-      [JSON.stringify(emails)]
-    );
+
+    if (useTable) {
+      // Spremi u tablicu
+      await pool.execute('INSERT INTO notification_emails (email) VALUES (?)', [email]);
+      emails.push(email);
+      console.log(`[EMAILS] POST: dodan u tablicu: ${email}`);
+    } else {
+      // Spremi u company_settings
+      const [rows] = await pool.execute(
+        'SELECT setting_value FROM company_settings WHERE setting_key = ?',
+        ['notification_emails']
+      );
+      emails = rows[0]?.setting_value ? JSON.parse(rows[0].setting_value) : [];
+      
+      if (emails.includes(email)) {
+        return res.status(400).json({ error: 'Email already exists' });
+      }
+      
+      emails.push(email);
+      
+      await pool.execute(
+        `INSERT INTO company_settings (setting_key, setting_value) 
+         VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
+        ['notification_emails', JSON.stringify(emails)]
+      );
+      console.log(`[EMAILS] POST: dodan u company_settings: ${email}`);
+    }
     
     res.json({ emails });
   } catch (error) {
@@ -88,20 +135,37 @@ router.delete('/notification-emails/:email', authenticate, async (req, res) => {
     if (!canEdit(req)) return res.status(403).json({ error: 'No permission' });
     
     const email = decodeURIComponent(req.params.email);
-    
-    const [rows] = await pool.execute(
-      'SELECT setting_value FROM company_settings WHERE setting_key = "notification_emails"'
-    );
-    let emails = rows[0]?.setting_value ? JSON.parse(rows[0].setting_value) : [];
-    
-    emails = emails.filter(e => e !== email);
-    
-    await pool.execute(
-      `INSERT INTO company_settings (setting_key, setting_value) 
-       VALUES ("notification_emails", ?)
-       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
-      [JSON.stringify(emails)]
-    );
+    let emails = [];
+    let useTable = false;
+
+    // Pokušaj 1: Zasebna tablica
+    try {
+      await pool.execute('DELETE FROM notification_emails WHERE email = ?', [email]);
+      const [rows] = await pool.execute('SELECT email FROM notification_emails');
+      emails = rows.map(r => r.email);
+      useTable = true;
+      console.log(`[EMAILS] DELETE: obrisan iz tablice: ${email}`);
+    } catch (e) {
+      // Tablica ne postoji
+    }
+
+    if (!useTable) {
+      // Pokušaj 2: company_settings
+      const [rows] = await pool.execute(
+        'SELECT setting_value FROM company_settings WHERE setting_key = ?',
+        ['notification_emails']
+      );
+      emails = rows[0]?.setting_value ? JSON.parse(rows[0].setting_value) : [];
+      emails = emails.filter(e => e !== email);
+      
+      await pool.execute(
+        `INSERT INTO company_settings (setting_key, setting_value) 
+         VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
+        ['notification_emails', JSON.stringify(emails)]
+      );
+      console.log(`[EMAILS] DELETE: obrisan iz company_settings: ${email}`);
+    }
     
     res.json({ emails });
   } catch (error) {
