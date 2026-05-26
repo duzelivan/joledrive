@@ -1,179 +1,187 @@
 const express = require('express');
 const pool = require('../config/database');
-const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 
-router.get('/', authenticate, authorizeEntity('dashboard'), async (req, res) => {
+// ============================================
+// DASHBOARD - glavni pregled
+// ============================================
+router.get('/', authenticate, async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const thirtyDaysLater = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const today = new Date();
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
 
-    const [notifications] = await pool.execute(
-      `SELECT id, manufacturer, model, license_plate, registration_date, yellow_card_date, pp_apparatus_date,
-        CASE 
-          WHEN registration_date <= ? THEN 'REGISTRATION_EXPIRED'
-          WHEN registration_date <= ? THEN 'REGISTRATION_EXPIRING'
-          WHEN yellow_card_date <= ? THEN 'YELLOW_CARD_EXPIRED'
-          WHEN yellow_card_date <= ? THEN 'YELLOW_CARD_EXPIRING'
-          WHEN pp_apparatus_date <= ? THEN 'PP_EXPIRED'
-          WHEN pp_apparatus_date <= ? THEN 'PP_EXPIRING'
-        END as alert_type
-       FROM vehicles 
-       WHERE registration_date <= ? OR yellow_card_date <= ? OR pp_apparatus_date <= ?`,
-      [today, thirtyDaysLater, today, thirtyDaysLater, today, thirtyDaysLater, thirtyDaysLater, thirtyDaysLater, thirtyDaysLater]
+    // --- VOZILA ---
+    const [vehicles] = await pool.execute('SELECT COUNT(*) as count FROM vehicles');
+    const [availableVehicles] = await pool.execute('SELECT COUNT(*) as count FROM vehicles WHERE assigned_to IS NULL');
+    const [occupiedVehicles] = await pool.execute('SELECT COUNT(*) as count FROM vehicles WHERE assigned_to IS NOT NULL');
+
+    // --- SERVISI ---
+    const [completedServices] = await pool.execute("SELECT COUNT(*) as count FROM services WHERE status = 'completed'");
+    const [activeServices] = await pool.execute("SELECT COUNT(*) as count FROM services WHERE status = 'confirmed'");
+    const [scheduledServices] = await pool.execute("SELECT COUNT(*) as count FROM services WHERE status = 'scheduled'");
+
+    // --- RAČUNI ---
+    const [unpaidInvoices] = await pool.execute("SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM invoices WHERE id NOT IN (SELECT invoice_id FROM invoice_payments GROUP BY invoice_id HAVING SUM(amount) >= invoices.amount) AND invoice_type != 'expense'");
+    const [partialInvoices] = await pool.execute(`
+      SELECT COUNT(*) as count, COALESCE(SUM(i.amount - COALESCE(p.paid, 0)), 0) as total
+      FROM invoices i
+      LEFT JOIN (SELECT invoice_id, SUM(amount) as paid FROM invoice_payments GROUP BY invoice_id) p ON i.id = p.invoice_id
+      WHERE i.invoice_type != 'expense' AND p.paid > 0 AND p.paid < i.amount
+    `);
+    const [monthIncome] = await pool.execute(
+      'SELECT COALESCE(SUM(amount), 0) as total FROM invoices WHERE invoice_type = ? AND created_at >= ? AND created_at <= ?',
+      ['income', startOfMonth, endOfMonth]
+    );
+    const [monthExpenses] = await pool.execute(
+      'SELECT COALESCE(SUM(amount), 0) as total FROM invoices WHERE invoice_type = ? AND created_at >= ? AND created_at <= ?',
+      ['expense', startOfMonth, endOfMonth]
     );
 
-    const [upcomingServices] = await pool.execute(
-      `SELECT s.*, v.manufacturer, v.model 
-       FROM services s 
-       JOIN vehicles v ON s.vehicle_id = v.id 
-       WHERE s.status IN ('scheduled', 'confirmed') 
-       AND s.service_date >= ? 
-       ORDER BY s.service_date ASC 
-       LIMIT 10`,
-      [today]
-    );
+    // --- OBAVEJŠTENJA (registracija, žuti karton, PP) ---
+    const alertWindow = 30; // dana
+    const [vehiclesAlerts] = await pool.execute(`
+      SELECT id, manufacturer, model, license_plate, registration_date, yellow_card_date, pp_apparatus_date
+      FROM vehicles
+      WHERE 
+        (registration_date IS NOT NULL AND registration_date <= DATE_ADD(CURDATE(), INTERVAL ? DAY))
+        OR (yellow_card_date IS NOT NULL AND yellow_card_date <= DATE_ADD(CURDATE(), INTERVAL ? DAY))
+        OR (pp_apparatus_date IS NOT NULL AND pp_apparatus_date <= DATE_ADD(CURDATE(), INTERVAL ? DAY))
+    `, [alertWindow, alertWindow, alertWindow]);
 
-    // ISPRAVKA: Samo prihodi (invoice_type = 'income' ili NULL)
-    const [unpaidResult] = await pool.execute(`
-      SELECT i.id, i.amount 
-      FROM invoices i
-      LEFT JOIN invoice_payments p ON i.id = p.invoice_id
-      WHERE p.id IS NULL
-      AND (i.invoice_type = 'income' OR i.invoice_type IS NULL)
+    const notifications = [];
+    for (const v of vehiclesAlerts) {
+      const checkDate = (field, labelPrefix) => {
+        if (!v[field]) return;
+        const date = new Date(v[field]);
+        const daysUntil = Math.ceil((date - today) / (1000 * 60 * 60 * 24));
+        let alertType = '';
+        if (daysUntil < 0) alertType = `${labelPrefix}_EXPIRED`;
+        else if (daysUntil <= alertWindow) alertType = `${labelPrefix}_EXPIRING`;
+        else return;
+
+        notifications.push({
+          vehicle_id: v.id,
+          manufacturer: v.manufacturer,
+          model: v.model,
+          license_plate: v.license_plate,
+          alert_type: alertType,
+          days_until: daysUntil,
+          date: v[field]
+        });
+      };
+
+      checkDate('registration_date', 'REGISTRATION');
+      checkDate('yellow_card_date', 'YELLOW_CARD');
+      checkDate('pp_apparatus_date', 'PP');
+    }
+
+    // Sortiraj po hitnosti (istekli prvo, pa oni što ističu uskoro)
+    notifications.sort((a, b) => a.days_until - b.days_until);
+
+    // --- NADOLAZEĆI SERVISI (sljedećih 30 dana) ---
+    const [upcomingServices] = await pool.execute(`
+      SELECT s.*, v.manufacturer, v.model, v.license_plate
+      FROM services s
+      LEFT JOIN vehicles v ON s.vehicle_id = v.id
+      WHERE s.service_date >= CURDATE() AND s.service_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+      ORDER BY s.service_date ASC
+      LIMIT 20
     `);
-    
-    let unpaidCount = unpaidResult.length;
-    let unpaidTotal = unpaidResult.reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0);
 
-    // ISPRAVKA: Samo prihodi (partial)
-    const [partialResult] = await pool.execute(`
-      SELECT i.id, i.amount, SUM(p.amount) as paid
-      FROM invoices i
-      JOIN invoice_payments p ON i.id = p.invoice_id
-      WHERE (i.invoice_type = 'income' OR i.invoice_type IS NULL)
-      GROUP BY i.id, i.amount
-      HAVING paid < i.amount
+    // --- ZADNJE AKTIVNOSTI ---
+    const [recentVehicles] = await pool.execute(`
+      SELECT 'vehicle' as type, CONCAT('Novo vozilo: ', manufacturer, ' ', model) as description, created_at
+      FROM vehicles ORDER BY created_at DESC LIMIT 3
     `);
-    
-    let partialCount = partialResult.length;
-    let partialTotal = partialResult.reduce((sum, inv) => sum + ((Number(inv.amount) || 0) - (Number(inv.paid) || 0)), 0);
-
-    // ISPRAVKA: Samo prihodi (paid)
-    const [paidResult] = await pool.execute(`
-      SELECT i.id, i.amount
-      FROM invoices i
-      JOIN invoice_payments p ON i.id = p.invoice_id
-      WHERE (i.invoice_type = 'income' OR i.invoice_type IS NULL)
-      GROUP BY i.id, i.amount
-      HAVING SUM(p.amount) >= i.amount
+    const [recentServices] = await pool.execute(`
+      SELECT 'service' as type, CONCAT('Servis: ', service_type) as description, created_at
+      FROM services ORDER BY created_at DESC LIMIT 3
     `);
-    
-    let paidCount = paidResult.length;
-    let paidTotal = paidResult.reduce((sum, inv) => sum + (Number(inv.amount) || 0), 0);
-
-    const totalDue = unpaidTotal + partialTotal;
-
-    const [[vehicleCount]] = await pool.execute('SELECT COUNT(*) as count FROM vehicles');
-    const [[serviceCount]] = await pool.execute('SELECT COUNT(*) as count FROM services WHERE status = "completed"');
-
-    const totalIncome = paidTotal;
-    
-    // ISPRAVKA: Troškovi uključuju i expense račune i servise
-    const [servicesCost] = await pool.execute(`
-      SELECT COALESCE(SUM(labor_cost), 0) as total_expenses
-      FROM services
-      WHERE status = 'completed'
+    const [recentInvoices] = await pool.execute(`
+      SELECT 'invoice' as type, CONCAT('Račun: ', invoice_number) as description, created_at
+      FROM invoices ORDER BY created_at DESC LIMIT 3
     `);
-    
-    const [expenseInvoices] = await pool.execute(`
-      SELECT COALESCE(SUM(amount), 0) as total
-      FROM invoices
-      WHERE invoice_type = 'expense' AND status = 'paid'
+    const [recentDocuments] = await pool.execute(`
+      SELECT 'document' as type, CONCAT('Dokument: ', title) as description, created_at
+      FROM documents ORDER BY created_at DESC LIMIT 3
     `);
-    
-    const totalExpenses = parseFloat(servicesCost[0].total_expenses || 0) + parseFloat(expenseInvoices[0].total || 0);
 
-    res.json({
-      notifications,
-      upcomingServices,
-      stats: {
-        vehicles: Number(vehicleCount.count) || 0,
-        completedServices: Number(serviceCount.count) || 0,
-        unpaidInvoices: unpaidCount,
-        unpaidTotal: unpaidTotal,
-        partialInvoices: partialCount,
-        partialTotal: partialTotal,
-        paidInvoices: paidCount,
-        paidTotal: paidTotal,
-        totalDue: totalDue,
-        totalIncome: totalIncome,
-        totalExpenses: totalExpenses,
-        profit: totalIncome - totalExpenses
-      }
-    });
+    const recentActivity = [
+      ...recentVehicles, ...recentServices, ...recentInvoices, ...recentDocuments
+    ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 10);
+
+    // --- RESPONS ---
+    const stats = {
+      vehicles: vehicles[0].count,
+      availableVehicles: availableVehicles[0].count,
+      occupiedVehicles: occupiedVehicles[0].count,
+      completedServices: completedServices[0].count,
+      activeServices: activeServices[0].count,
+      scheduledServices: scheduledServices[0].count,
+      unpaidInvoices: unpaidInvoices[0].count,
+      partialInvoices: partialInvoices[0].count,
+      unpaidTotal: parseFloat(unpaidInvoices[0].total || 0),
+      partialTotal: parseFloat(partialInvoices[0].total || 0),
+      totalDue: parseFloat(unpaidInvoices[0].total || 0) + parseFloat(partialInvoices[0].total || 0),
+      totalIncome: parseFloat(monthIncome[0].total || 0),
+      totalExpenses: parseFloat(monthExpenses[0].total || 0),
+      monthProfit: parseFloat(monthIncome[0].total || 0) - parseFloat(monthExpenses[0].total || 0)
+    };
+
+    res.json({ stats, notifications, upcomingServices, recentActivity });
   } catch (error) {
     console.error('Dashboard error:', error);
-    res.status(500).json({ error: 'Failed to fetch dashboard data', details: error.message });
+    res.status(500).json({ error: 'Failed to load dashboard' });
   }
 });
 
-router.get('/analytics', authenticate, authorizeEntity('dashboard'), async (req, res) => {
+// ============================================
+// ANALYTICS - prihodi i troškovi po periodu
+// ============================================
+router.get('/analytics', authenticate, async (req, res) => {
   try {
-    const { period, year, month, week } = req.query;
+    const { period, year, month } = req.query;
+    const selectedYear = year ? parseInt(year) : new Date().getFullYear();
 
-    let incomeQuery, expenseQuery;
-    let params = [];
+    let income = [];
+    let expenses = [];
 
-    if (period === 'month') {
-      // ISPRAVKA: Prihodi = samo income računi
-      incomeQuery = `SELECT MONTH(created_at) as period, COALESCE(SUM(amount), 0) as total 
-                      FROM invoices 
-                      WHERE status = 'paid' 
-                      AND (invoice_type = 'income' OR invoice_type IS NULL)
-                      AND YEAR(created_at) = ? 
-                      GROUP BY MONTH(created_at)`;
-      // ISPRAVKA: Troškovi = servisi + expense računi
-      expenseQuery = `SELECT MONTH(service_date) as period, COALESCE(SUM(labor_cost), 0) as total 
-                       FROM services 
-                       WHERE status = 'completed' 
-                       AND YEAR(service_date) = ? 
-                       GROUP BY MONTH(service_date)`;
-      params = [year || new Date().getFullYear()];
-    } else if (period === 'week') {
-      incomeQuery = `SELECT WEEK(created_at) as period, COALESCE(SUM(amount), 0) as total 
-                      FROM invoices 
-                      WHERE status = 'paid' 
-                      AND (invoice_type = 'income' OR invoice_type IS NULL)
-                      AND YEAR(created_at) = ? AND MONTH(created_at) = ? 
-                      GROUP BY WEEK(created_at)`;
-      expenseQuery = `SELECT WEEK(service_date) as period, COALESCE(SUM(labor_cost), 0) as total 
-                       FROM services 
-                       WHERE status = 'completed' 
-                       AND YEAR(service_date) = ? AND MONTH(service_date) = ? 
-                       GROUP BY WEEK(service_date)`;
-      params = [year || new Date().getFullYear(), month || new Date().getMonth() + 1];
+    if (period === 'week' && month) {
+      // Po tjednima unutar mjeseca
+      const [incomeData] = await pool.execute(`
+        SELECT WEEK(created_at) as period, SUM(amount) as total
+        FROM invoices WHERE invoice_type = 'income' AND YEAR(created_at) = ? AND MONTH(created_at) = ?
+        GROUP BY WEEK(created_at)
+      `, [selectedYear, month]);
+      const [expenseData] = await pool.execute(`
+        SELECT WEEK(created_at) as period, SUM(amount) as total
+        FROM invoices WHERE invoice_type = 'expense' AND YEAR(created_at) = ? AND MONTH(created_at) = ?
+        GROUP BY WEEK(created_at)
+      `, [selectedYear, month]);
+      income = incomeData;
+      expenses = expenseData;
     } else {
-      incomeQuery = `SELECT DATE_FORMAT(created_at, '%Y-%m') as period, COALESCE(SUM(amount), 0) as total 
-                      FROM invoices 
-                      WHERE status = 'paid' 
-                      AND (invoice_type = 'income' OR invoice_type IS NULL)
-                      AND created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
-                      GROUP BY DATE_FORMAT(created_at, '%Y-%m')`;
-      expenseQuery = `SELECT DATE_FORMAT(service_date, '%Y-%m') as period, COALESCE(SUM(labor_cost), 0) as total 
-                       FROM services 
-                       WHERE status = 'completed' 
-                       AND service_date >= DATE_SUB(NOW(), INTERVAL 12 MONTH) 
-                       GROUP BY DATE_FORMAT(service_date, '%Y-%m')`;
+      // Po mjesecima (default)
+      const [incomeData] = await pool.execute(`
+        SELECT MONTH(created_at) as period, SUM(amount) as total
+        FROM invoices WHERE invoice_type = 'income' AND YEAR(created_at) = ?
+        GROUP BY MONTH(created_at)
+      `, [selectedYear]);
+      const [expenseData] = await pool.execute(`
+        SELECT MONTH(created_at) as period, SUM(amount) as total
+        FROM invoices WHERE invoice_type = 'expense' AND YEAR(created_at) = ?
+        GROUP BY MONTH(created_at)
+      `, [selectedYear]);
+      income = incomeData;
+      expenses = expenseData;
     }
-
-    const [income] = await pool.execute(incomeQuery, params);
-    const [expenses] = await pool.execute(expenseQuery, params);
 
     res.json({ income, expenses });
   } catch (error) {
     console.error('Analytics error:', error);
-    res.status(500).json({ error: 'Failed to fetch analytics' });
+    res.status(500).json({ error: 'Failed to load analytics' });
   }
 });
 
