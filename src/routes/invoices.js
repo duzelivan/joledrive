@@ -32,12 +32,17 @@ async function enrichInvoiceWithPayments(invoice) {
   };
 }
 
+// ============================================
+// GET /api/invoices - POPRAVLJENO: dodan user_name
+// ============================================
 router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
     const { status, vehicle_id, search, invoice_type } = req.query;
-    let query = `SELECT i.*, v.manufacturer, v.model, v.license_plate 
+    // POPRAVLJENO: dodan LEFT JOIN users za user_name
+    let query = `SELECT i.*, v.manufacturer, v.model, v.license_plate, u.name as user_name 
                  FROM invoices i 
                  LEFT JOIN vehicles v ON i.vehicle_id = v.id 
+                 LEFT JOIN users u ON i.user_id = u.id 
                  WHERE 1=1`;
     const params = [];
 
@@ -74,12 +79,16 @@ router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
   }
 });
 
+// ============================================
+// GET /api/invoices/:id - POPRAVLJENO: dodan user_name
+// ============================================
 router.get('/:id', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
     const [invoiceRows] = await pool.execute(
-      `SELECT i.*, v.manufacturer, v.model, v.license_plate
+      `SELECT i.*, v.manufacturer, v.model, v.license_plate, u.name as user_name
        FROM invoices i 
        LEFT JOIN vehicles v ON i.vehicle_id = v.id 
+       LEFT JOIN users u ON i.user_id = u.id 
        WHERE i.id = ?`,
       [req.params.id]
     );
@@ -105,6 +114,9 @@ router.get('/:id', authenticate, authorizeEntity('invoices'), async (req, res) =
   }
 });
 
+// ============================================
+// POST /api/invoices - bez promjena
+// ============================================
 router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices.create']), async (req, res) => {
   try {
     const {
@@ -131,6 +143,9 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
   }
 });
 
+// ============================================
+// Payments - bez promjena
+// ============================================
 router.post('/:id/payments', authenticate, authorizeEntity('invoices'), authorize(['invoices.edit']), async (req, res) => {
   try {
     const { amount, payment_date, payment_method, notes } = req.body;
@@ -156,7 +171,7 @@ router.post('/:id/payments', authenticate, authorizeEntity('invoices'), authoriz
 
     if (newPaid > totalAmount) {
       return res.status(400).json({ 
-        error: `Payment exceeds remaining amount. Remaining: ${(totalAmount - currentlyPaid).toFixed(2)} €` 
+        error: `Payment exceeds remaining amount. Remaining: ${(totalAmount - currentlyPaid).toFixed(2)} \u20ac` 
       });
     }
 
@@ -281,14 +296,12 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
 });
 
 // ============================================
-// DELETE: Briše račun, plaćanja, fajl i ažurira profit
+// DELETE - bez promjena
 // ============================================
 router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoices.delete']), async (req, res) => {
   try {
-    // 1. Dohvati podatke o računu
     const [invoiceRows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [req.params.id]);
     
-    // 2. Vrati profit/trošak ako je račun bio plaćen
     if (invoiceRows.length > 0 && invoiceRows[0].status === 'paid' && invoiceRows[0].vehicle_id) {
       const amount = parseFloat(invoiceRows[0].amount);
       
@@ -309,7 +322,6 @@ router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['inv
       );
     }
 
-    // 3. Obriši povezani fajl na hostingu
     if (invoiceRows.length > 0 && invoiceRows[0].file_path) {
       try {
         const response = await axios.post(DELETE_FILE_URL, {
@@ -328,10 +340,7 @@ router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['inv
       }
     }
 
-    // 4. Obriši povezana plaćanja
     await pool.execute('DELETE FROM invoice_payments WHERE invoice_id = ?', [req.params.id]);
-
-    // 5. Obriši račun
     await pool.execute('DELETE FROM invoices WHERE id = ?', [req.params.id]);
     
     res.json({ message: 'Invoice deleted successfully' });
