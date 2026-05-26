@@ -1,3 +1,5 @@
+// src/middleware/auth.js
+
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 
@@ -23,7 +25,13 @@ const authenticate = async (req, res, next) => {
       return res.status(401).json({ error: 'User not found' });
     }
 
-    req.user = users[0];
+    const user = users[0];
+    
+    // PARSIRAJ JSON polja iz baze
+    user.permissions = safeParse(user.permissions);
+    user.entities = safeParse(user.entities);
+    
+    req.user = user;
     next();
   } catch (error) {
     if (error.name === 'TokenExpiredError') {
@@ -37,7 +45,7 @@ const authorize = (permissions) => {
   return (req, res, next) => {
     if (req.user.role === 'admin') return next();
 
-    const userPerms = safeParse(req.user.permissions);
+    const userPerms = req.user.permissions || {};
     const hasPermission = permissions.every(p => userPerms[p] === true);
 
     if (!hasPermission) {
@@ -51,7 +59,7 @@ const authorizeEntity = (entity) => {
   return (req, res, next) => {
     if (req.user.role === 'admin') return next();
 
-    const userEntities = safeParse(req.user.entities);
+    const userEntities = req.user.entities || {};
     
     if (!userEntities || Object.keys(userEntities).length === 0) return next();
 
