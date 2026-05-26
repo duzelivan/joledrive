@@ -6,7 +6,7 @@ const cron = require('node-cron');
 const pool = require('./config/database');
 const { router: recurringRouter } = require('./routes/recurring');
 require('dotenv').config();
-const settingsRouter = require('./routes/settings-backend');
+const settingsRouter = require('./routes/settings');
 
 const app = express();
 
