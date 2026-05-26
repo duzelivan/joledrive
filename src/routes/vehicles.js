@@ -1,7 +1,52 @@
 const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const pool = require('../config/database');
 const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
+
+// ============================================
+// MULTER - Upload konfiguracija za slike vozila
+// ============================================
+const uploadDir = path.join(__dirname, '../../uploads/vehicles');
+
+// Kreiraj direktorij ako ne postoji
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const manufacturer = (req.body.manufacturer || 'vehicle').replace(/[^a-zA-Z0-9\-_]/g, '_').replace(/_+/g, '_').substring(0, 40);
+    const model = (req.body.model || '').replace(/[^a-zA-Z0-9\-_]/g, '_').replace(/_+/g, '_').substring(0, 40);
+    const ext = path.extname(file.originalname).toLowerCase();
+    const timestamp = Date.now();
+    const baseName = model ? `${manufacturer}_${model}` : manufacturer;
+    cb(null, `${baseName}_${timestamp}${ext}`);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedTypes.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only JPG, PNG, GIF, WebP images are allowed'));
+    }
+  }
+});
+
+// ============================================
+// ROUTES
+// ============================================
 
 router.get('/', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
@@ -78,6 +123,60 @@ router.get('/:id', authenticate, authorizeEntity('vehicles'), async (req, res) =
   }
 });
 
+// ============================================
+// UPLOAD SLIKE VOZILA
+// ============================================
+router.post('/upload-image', authenticate, upload.single('image'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image uploaded' });
+    }
+    const imageUrl = `/uploads/vehicles/${req.file.filename}`;
+    res.json({
+      success: true,
+      image_url: imageUrl,
+      file_name: req.file.filename
+    });
+  } catch (error) {
+    console.error('Upload image error:', error);
+    res.status(500).json({ error: 'Failed to upload image' });
+  }
+});
+
+// ============================================
+// BRISANJE SLIKE VOZILA
+// ============================================
+router.post('/delete-image', authenticate, async (req, res) => {
+  try {
+    const { image_path } = req.body;
+    if (!image_path) {
+      return res.status(400).json({ error: 'No image path provided' });
+    }
+
+    // Sigurnosna provjera - samo uploads/vehicles/ dozvoljen
+    if (!image_path.startsWith('/uploads/vehicles/')) {
+      return res.status(403).json({ error: 'Invalid path' });
+    }
+
+    const filePath = path.join(__dirname, '../..', image_path);
+    const realUploadDir = fs.realpathSync(uploadDir);
+    const realFilePath = fs.existsSync(filePath) ? fs.realpathSync(filePath) : null;
+
+    if (realFilePath && !realFilePath.startsWith(realUploadDir)) {
+      return res.status(403).json({ error: 'Path not allowed' });
+    }
+
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+
+    res.json({ success: true, message: 'Image deleted' });
+  } catch (error) {
+    console.error('Delete image error:', error);
+    res.status(500).json({ error: 'Failed to delete image' });
+  }
+});
+
 router.post('/', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.create']), async (req, res) => {
   try {
     const { manufacturer, model, license_plate, chassis_number, year, mileage,
@@ -121,7 +220,7 @@ router.put('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicl
     if (registration_date) { updates.push('registration_date = ?'); values.push(registration_date); }
     if (yellow_card_date) { updates.push('yellow_card_date = ?'); values.push(yellow_card_date); }
     if (pp_apparatus_date) { updates.push('pp_apparatus_date = ?'); values.push(pp_apparatus_date); }
-    if (image_url) { updates.push('image_url = ?'); values.push(image_url); }
+    if (image_url !== undefined) { updates.push('image_url = ?'); values.push(image_url); }
     if (notes) { updates.push('notes = ?'); values.push(notes); }
     if (assigned_to !== undefined) { updates.push('assigned_to = ?'); values.push(assigned_to || null); }
 
@@ -140,6 +239,16 @@ router.put('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicl
 
 router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.delete']), async (req, res) => {
   try {
+    // Prvo dohvati vozilo da provjerimo ima li sliku
+    const [vehicles] = await pool.execute('SELECT image_url FROM vehicles WHERE id = ?', [req.params.id]);
+    if (vehicles.length > 0 && vehicles[0].image_url) {
+      // Obriši sliku sa diska
+      const imagePath = path.join(__dirname, '../..', vehicles[0].image_url);
+      if (fs.existsSync(imagePath)) {
+        fs.unlinkSync(imagePath);
+      }
+    }
+
     await pool.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
     res.json({ message: 'Vehicle deleted successfully' });
   } catch (error) {
