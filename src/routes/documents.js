@@ -1,46 +1,24 @@
 const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-const axios = require('axios');
 const pool = require('../config/database');
 const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-const DELETE_FILE_URL = 'https://joledrive.com/delete-file.php';
-const EMAIL_API_SECRET = process.env.EMAIL_API_SECRET;
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/documents/');
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  }
-});
-
-const upload = multer({ 
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 }
-});
-
-// SIGURNO: Whitelist za sortiranje
-const ALLOWED_SORT = {
-  'title': 'd.title ASC',
-  'title_desc': 'd.title DESC',
-  'date': 'd.created_at DESC',
-  'date_asc': 'd.created_at ASC'
-};
-
+// ============================================
+// Dohvati sve dokumente
+// ============================================
 router.get('/', authenticate, authorizeEntity('documents'), async (req, res) => {
   try {
-    const { search, type, vehicle_id, sort_by } = req.query;
-    let query = `SELECT d.*, v.manufacturer, v.model, v.license_plate, u.name as user_name 
-                 FROM documents d 
-                 LEFT JOIN vehicles v ON d.vehicle_id = v.id 
-                 LEFT JOIN users u ON d.user_id = u.id 
-                 WHERE 1=1`;
+    const { search, type, sort_by } = req.query;
+
+    let query = `
+      SELECT d.*, 
+        v.manufacturer, v.model, v.license_plate,
+        u.name as user_name
+      FROM documents d
+      LEFT JOIN vehicles v ON d.vehicle_id = v.id
+      LEFT JOIN users u ON d.user_id = u.id
+      WHERE 1=1
+    `;
     const params = [];
 
     if (search) {
@@ -51,69 +29,118 @@ router.get('/', authenticate, authorizeEntity('documents'), async (req, res) => 
       query += ' AND d.document_type = ?';
       params.push(type);
     }
-    if (vehicle_id) {
-      query += ' AND d.vehicle_id = ?';
-      params.push(vehicle_id);
-    }
 
-    // SIGURNO: Koristi whitelist
-    const sortClause = ALLOWED_SORT[sort_by] || ALLOWED_SORT['date'];
-    query += ' ORDER BY ' + sortClause;
+    query += ' ORDER BY ';
+    if (sort_by === 'title') {
+      query += 'd.title ASC';
+    } else {
+      query += 'd.created_at DESC';
+    }
 
     const [documents] = await pool.execute(query, params);
     res.json(documents);
   } catch (error) {
+    console.error('Fetch documents error:', error);
     res.status(500).json({ error: 'Failed to fetch documents' });
   }
 });
 
-router.post('/', authenticate, authorizeEntity('documents'), authorize(['documents.create']), async (req, res) => {
+// ============================================
+// Dohvati jedan dokument
+// ============================================
+router.get('/:id', authenticate, authorizeEntity('documents'), async (req, res) => {
   try {
-    const { title, description, document_type, file_path, file_size, file_type, vehicle_id, user_id } = req.body;
-
-    const [result] = await pool.execute(
-      `INSERT INTO documents (title, description, document_type, file_path, file_size, file_type, vehicle_id, user_id) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [title, description, document_type, file_path, file_size, file_type, vehicle_id || null, user_id || null]
+    const [documents] = await pool.execute(
+      `SELECT d.*, 
+        v.manufacturer, v.model, v.license_plate,
+        u.name as user_name
+       FROM documents d
+       LEFT JOIN vehicles v ON d.vehicle_id = v.id
+       LEFT JOIN users u ON d.user_id = u.id
+       WHERE d.id = ?`,
+      [req.params.id]
     );
 
-    res.status(201).json({ id: result.insertId, file_path, message: 'Document saved successfully' });
+    if (documents.length === 0) return res.status(404).json({ error: 'Document not found' });
+    res.json(documents[0]);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to save document' });
+    console.error('Fetch document error:', error);
+    res.status(500).json({ error: 'Failed to fetch document' });
   }
 });
 
 // ============================================
-// DELETE: Briše i iz baze i fajl na hostingu
+// Kreiraj novi dokument
+// ============================================
+router.post('/', authenticate, authorizeEntity('documents'), authorize(['documents.create']), async (req, res) => {
+  try {
+    const { title, description, document_type, vehicle_id, user_id, 
+      file_path, file_size, file_type } = req.body;
+
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+
+    const [result] = await pool.execute(
+      `INSERT INTO documents (title, description, document_type, vehicle_id, user_id,
+        file_path, file_size, file_type) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        title, description || null, document_type || 'other', vehicle_id || null, user_id || null,
+        file_path || null, file_size || null, file_type || null
+      ]
+    );
+
+    res.status(201).json({ id: result.insertId, message: 'Document created successfully' });
+  } catch (error) {
+    console.error('Create document error:', error);
+    res.status(500).json({ error: 'Failed to create document' });
+  }
+});
+
+// ============================================
+// UREDI DOKUMENT (NOVO)
+// ============================================
+router.put('/:id', authenticate, authorizeEntity('documents'), authorize(['documents.edit']), async (req, res) => {
+  try {
+    const { title, description, document_type, vehicle_id, user_id,
+      file_path, file_size, file_type } = req.body;
+
+    const updates = [];
+    const values = [];
+
+    if (title) { updates.push('title = ?'); values.push(title); }
+    if (description !== undefined) { updates.push('description = ?'); values.push(description); }
+    if (document_type) { updates.push('document_type = ?'); values.push(document_type); }
+    if (vehicle_id !== undefined) { updates.push('vehicle_id = ?'); values.push(vehicle_id || null); }
+    if (user_id !== undefined) { updates.push('user_id = ?'); values.push(user_id || null); }
+    if (file_path) { 
+      updates.push('file_path = ?'); values.push(file_path);
+      updates.push('file_size = ?'); values.push(file_size);
+      updates.push('file_type = ?'); values.push(file_type);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    values.push(req.params.id);
+
+    await pool.execute(`UPDATE documents SET ${updates.join(', ')} WHERE id = ?`, values);
+
+    res.json({ message: 'Document updated successfully' });
+  } catch (error) {
+    console.error('Update document error:', error);
+    res.status(500).json({ error: 'Failed to update document' });
+  }
+});
+
+// ============================================
+// Obriši dokument
 // ============================================
 router.delete('/:id', authenticate, authorizeEntity('documents'), authorize(['documents.delete']), async (req, res) => {
   try {
-    // 1. Dohvati podatke o dokumentu
-    const [docs] = await pool.execute('SELECT file_path FROM documents WHERE id = ?', [req.params.id]);
-    
-    // 2. Obriši fajl na hostingu preko API-ja
-    if (docs.length > 0 && docs[0].file_path) {
-      try {
-        const response = await axios.post(DELETE_FILE_URL, {
-          file_path: docs[0].file_path
-        }, {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-Secret': EMAIL_API_SECRET
-          },
-          timeout: 10000
-        });
-        
-        console.log('File deletion response:', response.data);
-      } catch (fileError) {
-        // Logiraj ali ne prekidaj - fajl možda već ne postoji
-        console.error('File deletion warning:', fileError.response?.data || fileError.message);
-      }
-    }
-
-    // 3. Obriši iz baze
     await pool.execute('DELETE FROM documents WHERE id = ?', [req.params.id]);
-    
     res.json({ message: 'Document deleted successfully' });
   } catch (error) {
     console.error('Delete document error:', error);
