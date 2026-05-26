@@ -15,7 +15,7 @@ app.set('trust proxy', 1);
 // Security middleware
 app.use(helmet());
 app.use(cors({
-  origin: ['https://joledrive.com', 'https://www.joledrive.com', 'http://localhost:3000', 'http://localhost:5173'],
+  origin: ['https://joledrive.com', 'https://www.joledrive.com', 'https://joledrive-production.up.railway.app', 'http://localhost:3000', 'http://localhost:5173', 'http://localhost:4173'],
   credentials: true
 }));
 
@@ -63,7 +63,7 @@ app.use('/api/vehicle-assignments', require('./routes/vehicleAssignments'));
 app.use('/api/mileage', require('./routes/mileage'));
 app.use('/api/share', require('./routes/share'));
 app.use('/api/recurring', recurringRouter);
-// UKLONJEN DUPLI: app.use('/api/settings', settingsRouter); -- vec postoji linija gore
+// UKLONJEN DUPLI: settings je vec registriran 10 linija gore
 
 // ============================================
 // CRON - Automatske dnevne obavijesti
@@ -71,15 +71,14 @@ app.use('/api/recurring', recurringRouter);
 const { sendEmail } = require('./utils/email');
 const { authenticate } = require('./middleware/auth');
 
-// POPRAVLJENO: Koristi company_settings umjesto nepostojece settings tablice
+// CITA IZ settings TABLICE (KAKO JE I BILO)
 async function getNotificationEmails() {
   try {
     const [rows] = await pool.execute(
-      'SELECT setting_value FROM company_settings WHERE setting_key = ?',
+      'SELECT setting_value FROM settings WHERE setting_key = ?',
       ['notification_emails']
     );
     if (rows.length === 0 || !rows[0].setting_value) return [];
-    // Moze biti JSON array ili comma-separated string
     const val = rows[0].setting_value;
     try {
       const parsed = JSON.parse(val);
