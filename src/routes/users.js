@@ -26,6 +26,23 @@ const validatePassword = (password) => {
   };
 };
 
+// ============================================
+// NOVO: /api/users/dropdown - za sve autenticirane korisnike
+// Vraca samo id, name, type - bez admin zahtjeva
+// Koristi se u dropdown-ovima na računima i dokumentima
+// ============================================
+router.get('/dropdown', authenticate, async (req, res) => {
+  try {
+    const [users] = await pool.execute(
+      `SELECT id, name, type FROM users WHERE active = 1 ORDER BY name ASC`
+    );
+    res.json(users);
+  } catch (error) {
+    console.error('Fetch dropdown error:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
 router.get('/', authenticate, authorizeEntity('users'), requireAdmin, async (req, res) => {
   try {
     const [users] = await pool.execute(
@@ -199,7 +216,6 @@ router.put('/:id', authenticate, authorizeEntity('users'), async (req, res) => {
     if (company_oib !== undefined) { updates.push('company_oib = ?'); values.push(company_oib); }
     
     if (password && password.length > 0) {
-      // PASSWORD POLICY i pri ažuriranju
       const validation = validatePassword(password);
       if (!validation.valid) {
         return res.status(400).json({ 
@@ -246,7 +262,6 @@ router.post('/:id/reset-password', authenticate, authorizeEntity('users'), requi
     if (userRows.length === 0) return res.status(404).json({ error: 'User not found' });
     if (userRows[0].type === 'client') return res.status(400).json({ error: 'Cannot reset password for clients' });
 
-    // Generiraj jaku random lozinku
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
     let newPassword = '';
     for (let i = 0; i < 12; i++) {
