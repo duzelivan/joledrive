@@ -91,6 +91,7 @@ router.delete('/notification-emails/:email', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to delete email' });
   }
 });
+
 // ============================================
 // GET /api/settings/company - Podaci tvrtke
 // ============================================
