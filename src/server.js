@@ -6,7 +6,6 @@ const cron = require('node-cron');
 const pool = require('./config/database');
 const { router: recurringRouter } = require('./routes/recurring');
 require('dotenv').config();
-const settingsRouter = require('./routes/settings');
 
 const app = express();
 
@@ -16,7 +15,7 @@ app.set('trust proxy', 1);
 // Security middleware
 app.use(helmet());
 app.use(cors({
-  origin: ['https://joledrive.com', 'https://www.joledrive.com', 'http://localhost:3000', 'http://localhost:4173'],
+  origin: ['https://joledrive.com', 'https://www.joledrive.com', 'http://localhost:3000', 'http://localhost:5173'],
   credentials: true
 }));
 
@@ -64,7 +63,7 @@ app.use('/api/vehicle-assignments', require('./routes/vehicleAssignments'));
 app.use('/api/mileage', require('./routes/mileage'));
 app.use('/api/share', require('./routes/share'));
 app.use('/api/recurring', recurringRouter);
-app.use('/api/settings', settingsRouter);
+// UKLONJEN DUPLI: app.use('/api/settings', settingsRouter); -- vec postoji linija gore
 
 // ============================================
 // CRON - Automatske dnevne obavijesti
@@ -72,18 +71,32 @@ app.use('/api/settings', settingsRouter);
 const { sendEmail } = require('./utils/email');
 const { authenticate } = require('./middleware/auth');
 
+// POPRAVLJENO: Koristi company_settings umjesto nepostojece settings tablice
 async function getNotificationEmails() {
-  const [rows] = await pool.execute(
-    'SELECT setting_value FROM settings WHERE setting_key = ?',
-    ['notification_emails']
-  );
-  if (rows.length === 0) return [];
-  return rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
+  try {
+    const [rows] = await pool.execute(
+      'SELECT setting_value FROM company_settings WHERE setting_key = ?',
+      ['notification_emails']
+    );
+    if (rows.length === 0 || !rows[0].setting_value) return [];
+    // Moze biti JSON array ili comma-separated string
+    const val = rows[0].setting_value;
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (e) {
+      // Nije JSON, tretiraj kao CSV
+    }
+    return val.split(',').map(e => e.trim()).filter(e => e);
+  } catch (error) {
+    console.error('[getNotificationEmails] Error:', error.message);
+    return [];
+  }
 }
 
 async function sendDailyNotifications() {
   try {
-    console.log(`[${new Date().toISOString()}] Pokrećem dnevne obavijesti...`);
+    console.log(`[${new Date().toISOString()}] Pokrecem dnevne obavijesti...`);
     
     const today = new Date().toISOString().split('T')[0];
     const thirtyDaysLater = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -127,12 +140,12 @@ async function sendDailyNotifications() {
           if (date <= now) alerts.push(`${label} ISTEKAO (${dateStr})`);
           else if (date <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)) {
             const days = Math.ceil((date - now) / (1000 * 60 * 60 * 24));
-            alerts.push(`${label} ističe za ${days} dana`);
+            alerts.push(`${label} istice za ${days} dana`);
           }
         };
 
         checkDate(vehicle.registration_date, 'Registracija');
-        checkDate(vehicle.yellow_card_date, 'Žuti karton');
+        checkDate(vehicle.yellow_card_date, 'Zuti karton');
         checkDate(vehicle.pp_apparatus_date, 'PP aparat');
 
         if (alerts.length === 0) continue;
@@ -143,15 +156,15 @@ async function sendDailyNotifications() {
           `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
               <h2 style="color: #dc2626;">JoleDrive Obavijest</h2>
-              <p>Poštovani,</p>
-              <p>Sljedeće stavke zahtijevaju pažnju za vozilo:</p>
+              <p>Postovani,</p>
+              <p>Sljedece stavke zahtijevaju paznju za vozilo:</p>
               
               <div style="background: #f3f4f6; padding: 16px; border-radius: 8px; margin: 16px 0;">
                 <h3 style="margin-top: 0; color: #1f2937;">
                   ${vehicle.manufacturer} ${vehicle.model}
                   <span style="color: #6b7280; font-size: 14px;">(${vehicle.license_plate || '---'})</span>
                 </h3>
-                ${vehicle.assigned_name ? `<p><strong>Zadužio:</strong> ${vehicle.assigned_name}</p>` : ''}
+                ${vehicle.assigned_name ? `<p><strong>Zaduzio:</strong> ${vehicle.assigned_name}</p>` : ''}
                 <ul style="color: #dc2626;">
                   ${alerts.map(a => `<li>${a}</li>`).join('')}
                 </ul>
@@ -173,18 +186,18 @@ async function sendDailyNotifications() {
           );
         }
       } catch (vehicleErr) {
-        console.error(`[CRON] Greška za vozilo ${vehicle.id}:`, vehicleErr.message);
+        console.error(`[CRON] Greska za vozilo ${vehicle.id}:`, vehicleErr.message);
       }
     }
 
-    console.log(`[${new Date().toISOString()}] Završeno: ${sent} poslano, ${skipped} preskočeno`);
+    console.log(`[${new Date().toISOString()}] Zavrseno: ${sent} poslano, ${skipped} preskoceno`);
 
   } catch (error) {
-    console.error('[CRON] Greška u dnevnim obavijestima:', error.message);
+    console.error('[CRON] Greska u dnevnim obavijestima:', error.message);
   }
 }
 
-// TEST ENDPOINT - zaštićen autentikacijom (samo admin)
+// TEST ENDPOINT - zasticen autentikacijom (samo admin)
 app.get('/test-notifications', authenticate, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -204,7 +217,7 @@ cron.schedule('0 9 * * *', sendDailyNotifications, {
   timezone: 'Europe/Zagreb'
 });
 
-console.log('Cron postavljen: Svakog dana u 9:00 šalje obavijesti');
+console.log('Cron postavljen: Svakog dana u 9:00 salje obavijesti');
 
 // Error handling
 app.use((err, req, res, next) => {
@@ -231,14 +244,11 @@ setInterval(() => {
 process.on('SIGTERM', () => {
   console.log('[SIGTERM] Graceful shutdown started...');
   
-  // Zaustavi cron da ne pokrene novi job
   cron.getTasks().forEach(task => task.stop());
   
-  // Zatvori HTTP server (ne primamo nove requestove)
   server.close(() => {
     console.log('[SIGTERM] HTTP server closed');
     
-    // Zatvori DB pool
     pool.end().then(() => {
       console.log('[SIGTERM] DB pool closed');
       process.exit(0);
@@ -248,14 +258,12 @@ process.on('SIGTERM', () => {
     });
   });
   
-  // Force exit nakon 10 sekundi ako nešto zaglavi
   setTimeout(() => {
     console.error('[SIGTERM] Forced exit after timeout');
     process.exit(1);
   }, 10000);
 });
 
-// Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   console.error('[UNCAUGHT]', err);
   process.exit(1);
