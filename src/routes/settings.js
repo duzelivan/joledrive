@@ -3,6 +3,19 @@ const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const router = express.Router();
 
+router.get('/', authenticate, authorizeEntity('settings'), async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT setting_key, setting_value FROM settings');
+    const settings = {};
+    rows.forEach(row => {
+      settings[row.setting_key] = row.setting_value;
+    });
+    res.json(settings);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
 // ============================================
 // HELPERS
 // ============================================
