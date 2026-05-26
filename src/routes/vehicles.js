@@ -50,6 +50,24 @@ router.post('/upload', authenticate, upload.single('image'), (req, res) => {
   res.json({ image_url: imageUrl, message: 'Image uploaded' });
 });
 
+// ============================================
+// NOVO: /api/vehicles/dropdown - za sve autenticirane korisnike
+// Vraca samo id, manufacturer, model, license_plate
+// Koristi se u dropdown-ovima na racunima i dokumentima
+// ============================================
+router.get('/dropdown', authenticate, async (req, res) => {
+  try {
+    const [vehicles] = await pool.execute(
+      `SELECT id, manufacturer, model, license_plate 
+       FROM vehicles WHERE active = 1 ORDER BY manufacturer ASC, model ASC`
+    );
+    res.json(vehicles);
+  } catch (error) {
+    console.error('Fetch vehicles dropdown error:', error);
+    res.status(500).json({ error: 'Failed to fetch vehicles' });
+  }
+});
+
 router.get('/', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
     const active = req.query.active === '0' ? 0 : 1;
