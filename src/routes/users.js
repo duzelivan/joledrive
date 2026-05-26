@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const pool = require('../config/database');
-const { authenticate, requireAdmin, authorizeEntity } = require('../middleware/auth');
+const { authenticate, requireAdmin, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
 // PASSWORD POLICY VALIDATOR
@@ -43,7 +43,8 @@ router.get('/dropdown', authenticate, async (req, res) => {
   }
 });
 
-router.get('/', authenticate, authorizeEntity('users'), requireAdmin, async (req, res) => {
+// GET lista korisnika - dostupno svima s 'users' entitetom (ne samo admin)
+router.get('/', authenticate, authorizeEntity('users'), async (req, res) => {
   try {
     const [users] = await pool.execute(
       `SELECT u.id, u.name, u.email, u.role, u.type, u.phone, u.driver_license, 
@@ -104,7 +105,8 @@ router.get('/:id', authenticate, authorizeEntity('users'), async (req, res) => {
   }
 });
 
-router.post('/', authenticate, authorizeEntity('users'), requireAdmin, async (req, res) => {
+// POST kreiranje korisnika - treba users.create permisiju (ili admin)
+router.post('/', authenticate, authorizeEntity('users'), authorize(['users.create']), async (req, res) => {
   try {
     const { 
       name, email, password, role, type = 'user', phone, 
@@ -187,9 +189,14 @@ router.post('/', authenticate, authorizeEntity('users'), requireAdmin, async (re
   }
 });
 
+// PUT azuriranje korisnika - admin, vlastiti profil, ili users.edit permisija
 router.put('/:id', authenticate, authorizeEntity('users'), async (req, res) => {
   try {
-    if (req.user.role !== 'admin' && req.user.id != req.params.id) {
+    const userPerms = req.user.permissions || {};
+    const canEditUsers = req.user.role === 'admin' || userPerms['users.edit'] === true;
+    const isOwnProfile = req.user.id == req.params.id;
+    
+    if (!canEditUsers && !isOwnProfile) {
       return res.status(403).json({ error: 'Can only edit your own profile' });
     }
 
@@ -247,7 +254,8 @@ router.put('/:id', authenticate, authorizeEntity('users'), async (req, res) => {
   }
 });
 
-router.delete('/:id', authenticate, authorizeEntity('users'), requireAdmin, async (req, res) => {
+// DELETE brisanje korisnika - treba users.delete permisiju (ili admin)
+router.delete('/:id', authenticate, authorizeEntity('users'), authorize(['users.delete']), async (req, res) => {
   try {
     await pool.execute('DELETE FROM users WHERE id = ?', [req.params.id]);
     res.json({ message: 'User deleted successfully' });
