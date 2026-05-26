@@ -50,6 +50,7 @@ app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/vehicle-assignments', require('./routes/vehicleAssignments'));
+app.use('/api/share', require('./routes/share'));
 
 // ============================================
 // CRON - Automatske dnevne obavijesti
