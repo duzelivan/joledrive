@@ -122,15 +122,14 @@ router.post('/', authenticate, authorizeEntity('users'), authorize(['users.creat
 
     const [result] = await pool.execute(
       `INSERT INTO users (name, email, password, role, type, phone, driver_license,
-        address, oib, company_name, company_oib, active, entities, permissions, created_by) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        address, oib, company_name, company_oib, active, entities, permissions) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name, email, hashedPassword, role || 'user', type || 'user',
         phone || null, driver_license || null, address || null, oib || null,
         company_name || null, company_oib || null,
         active !== undefined ? active : true,
-        serializeField(entities), serializeField(permissions),
-        req.user.id
+        serializeField(entities), serializeField(permissions)
       ]
     );
 
