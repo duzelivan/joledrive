@@ -12,16 +12,21 @@ const canEdit = (req) => isAdmin(req) || req.user?.permissions?.['settings.edit'
 // ============================================
 // GET /api/settings/notification-emails
 // ============================================
-router.get('/notification-emails', authenticate, async (req, res) => {
+router.get('/notification-emails', authenticate, authorizeEntity('settings'), async (req, res) => {
   try {
     const [rows] = await pool.execute(
-      'SELECT setting_value FROM company_settings WHERE setting_key = "notification_emails"'
+      'SELECT setting_value FROM settings WHERE setting_key = ?',
+      ['notification_emails']
     );
-    const emails = rows[0]?.setting_value ? JSON.parse(rows[0].setting_value) : [];
+    
+    let emails = [];
+    if (rows.length > 0 && rows[0].setting_value) {
+      emails = rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
+    }
+    
     res.json({ emails });
   } catch (error) {
-    console.error('Fetch emails error:', error);
-    res.status(500).json({ error: 'Failed to fetch emails' });
+    res.status(500).json({ error: 'Failed to fetch notification emails' });
   }
 });
 
