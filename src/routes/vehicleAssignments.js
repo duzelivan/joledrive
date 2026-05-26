@@ -3,7 +3,7 @@ const pool = require('../config/database');
 const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
-// Dohvati povijest zaduživanja za vozilo
+// Dohvati povijest zaduzivanja za vozilo
 router.get('/vehicle/:vehicleId', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
     const [assignments] = await pool.execute(
@@ -24,7 +24,7 @@ router.get('/vehicle/:vehicleId', authenticate, authorizeEntity('vehicles'), asy
   }
 });
 
-// Dohvati trenutno zaduženje (aktivno)
+// Dohvati trenutno zaduzenje (aktivno)
 router.get('/vehicle/:vehicleId/current', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
     const [assignments] = await pool.execute(
@@ -42,7 +42,7 @@ router.get('/vehicle/:vehicleId/current', authenticate, authorizeEntity('vehicle
   }
 });
 
-// Zaduži vozilo (novo zaduženje)
+// Zaduzi vozilo (novo zaduzenje)
 router.post('/', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.edit']), async (req, res) => {
   const connection = await pool.getConnection();
   
@@ -51,7 +51,7 @@ router.post('/', authenticate, authorizeEntity('vehicles'), authorize(['vehicles
 
     const { vehicle_id, user_id, start_mileage, notes } = req.body;
 
-    // Provjeri je li vozilo već zaduženo
+    // Provjeri je li vozilo vec zaduzeno
     const [current] = await connection.execute(
       'SELECT id FROM vehicle_assignments WHERE vehicle_id = ? AND returned_at IS NULL',
       [vehicle_id]
@@ -75,7 +75,7 @@ router.post('/', authenticate, authorizeEntity('vehicles'), authorize(['vehicles
       return res.status(404).json({ error: 'Vehicle not found' });
     }
 
-    // Umetni novo zaduženje
+    // Umetni novo zaduzenje
     const [result] = await connection.execute(
       `INSERT INTO vehicle_assignments 
         (vehicle_id, user_id, assigned_at, start_mileage, notes, created_by) 
@@ -83,7 +83,7 @@ router.post('/', authenticate, authorizeEntity('vehicles'), authorize(['vehicles
       [vehicle_id, user_id, start_mileage || vehicle[0].mileage, notes || null, req.user.id]
     );
 
-    // Ažuriraj vehicles.assigned_to
+    // Azuriraj vehicles.assigned_to
     await connection.execute(
       'UPDATE vehicles SET assigned_to = ? WHERE id = ?',
       [user_id, vehicle_id]
@@ -104,7 +104,7 @@ router.post('/', authenticate, authorizeEntity('vehicles'), authorize(['vehicles
   }
 });
 
-// Razduži vozilo
+// Razduzi vozilo
 router.put('/:id/return', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.edit']), async (req, res) => {
   const connection = await pool.getConnection();
   
@@ -113,7 +113,7 @@ router.put('/:id/return', authenticate, authorizeEntity('vehicles'), authorize([
 
     const { end_mileage, notes } = req.body;
 
-    // Provjeri postoji li zaduženje
+    // Provjeri postoji li zaduzenje
     const [assignment] = await connection.execute(
       'SELECT * FROM vehicle_assignments WHERE id = ? AND returned_at IS NULL',
       [req.params.id]
@@ -125,7 +125,9 @@ router.put('/:id/return', authenticate, authorizeEntity('vehicles'), authorize([
       return res.status(404).json({ error: 'Active assignment not found' });
     }
 
-    const startMileage = assignment[0].start_mileage || 0;
+    // POPRAVLJENO: koristi assignment[0] jer je rezultat niz
+    const assignmentData = assignment[0];
+    const startMileage = assignmentData.start_mileage || 0;
     const endMileageNum = parseInt(end_mileage) || 0;
 
     if (endMileageNum < startMileage) {
@@ -136,20 +138,21 @@ router.put('/:id/return', authenticate, authorizeEntity('vehicles'), authorize([
       });
     }
 
+    // Zabiljezi kilometrazu u mileage_logs
     if (end_mileage && end_mileage > 0) {
-  await connection.execute(
-    `INSERT INTO mileage_logs (vehicle_id, recorded_date, mileage, source, notes, created_by)
-     VALUES (?, CURDATE(), ?, 'return', ?, ?)`,
-    [
-      assignment.vehicle_id,
-      end_mileage,
-      notes ? `Vraćanje: ${notes}` : `Vraćanje vozila`,
-      req.user.id
-    ]
-  );
-}
+      await connection.execute(
+        `INSERT INTO mileage_logs (vehicle_id, recorded_date, mileage, source, notes, created_by)
+         VALUES (?, CURDATE(), ?, 'return', ?, ?)`,
+        [
+          assignmentData.vehicle_id,  // POPRAVLJENO
+          end_mileage,
+          notes ? `Vracanje: ${notes}` : `Vracanje vozila`,
+          req.user.id
+        ]
+      );
+    }
 
-    // Ažuriraj zaduženje
+    // Azuriraj zaduzenje
     await connection.execute(
       `UPDATE vehicle_assignments 
        SET returned_at = NOW(), end_mileage = ?, notes = CONCAT(COALESCE(notes, ''), '\nReturn notes: ', ?)
@@ -157,10 +160,10 @@ router.put('/:id/return', authenticate, authorizeEntity('vehicles'), authorize([
       [endMileageNum, notes || 'No notes', req.params.id]
     );
 
-    // Ažuriraj vehicles.assigned_to na NULL
+    // Azuriraj vehicles.assigned_to na NULL
     await connection.execute(
       'UPDATE vehicles SET assigned_to = NULL, mileage = ? WHERE id = ?',
-      [endMileageNum, assignment[0].vehicle_id]
+      [endMileageNum, assignmentData.vehicle_id]  // POPRAVLJENO
     );
 
     await connection.commit();
@@ -178,7 +181,7 @@ router.put('/:id/return', authenticate, authorizeEntity('vehicles'), authorize([
   }
 });
 
-// Obriši zapis iz povijesti (samo admin)
+// Obrisi zapis iz povijesti (samo admin)
 router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.delete']), async (req, res) => {
   try {
     await pool.execute('DELETE FROM vehicle_assignments WHERE id = ?', [req.params.id]);
