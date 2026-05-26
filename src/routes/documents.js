@@ -83,6 +83,25 @@ router.post('/', authenticate, authorizeEntity('documents'), authorize(['documen
   }
 });
 
+// PUT /api/documents/:id - Ažuriraj dokument (bez file-a)
+router.put('/:id', authenticate, async (req, res) => {
+  try {
+    const { title, description, document_type, vehicle_id, user_id } = req.body;
+    
+    await pool.execute(
+      `UPDATE documents 
+       SET title = ?, description = ?, document_type = ?, 
+           vehicle_id = ?, user_id = ? 
+       WHERE id = ?`,
+      [title, description, document_type, vehicle_id || null, user_id || null, req.params.id]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================
 // DELETE: Briše i iz baze i fajl na hostingu
 // ============================================
