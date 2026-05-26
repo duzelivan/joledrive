@@ -4,15 +4,20 @@ const { authenticate, authorize, authorizeEntity } = require('../middleware/auth
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const axios = require('axios');
 const router = express.Router();
 
-// Ensure uploads directory exists
+// PHP endpoint for vehicle image deletion
+const DELETE_VEHICLE_IMAGE_URL = 'https://joledrive.com/delete-vehicle-image.php';
+const EMAIL_API_SECRET = process.env.EMAIL_API_SECRET;
+
+// Ensure uploads directory exists (for local upload fallback)
 const uploadDir = path.join(__dirname, '..', '..', 'uploads', 'vehicles');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Multer config
+// Multer config (local upload fallback)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadDir);
@@ -33,10 +38,10 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+  limits: { fileSize: 10 * 1024 * 1024 }
 });
 
-// Upload endpoint — returns full URL
+// Upload endpoint - returns full URL
 router.post('/upload', authenticate, upload.single('image'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const protocol = req.headers['x-forwarded-proto'] || req.protocol;
@@ -212,18 +217,52 @@ router.put('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicl
   }
 });
 
+// ============================================
+// DELETE: Brise vozilo + sliku (lokalno i na hostingu)
+// ============================================
 router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.delete']), async (req, res) => {
   try {
-    // Delete associated image if exists
+    // 1. Dohvati podatke o vozilu
     const [vehicles] = await pool.execute('SELECT image_url FROM vehicles WHERE id = ?', [req.params.id]);
-    if (vehicles[0]?.image_url?.startsWith('/uploads/')) {
-      const imgPath = path.join(__dirname, '..', '..', vehicles[0].image_url);
-      if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath);
+    
+    if (vehicles.length > 0 && vehicles[0].image_url) {
+      const imageUrl = vehicles[0].image_url;
+      
+      // 2a. Ako je slika na hostingu (/uploads/vehicles/), pozovi PHP endpoint
+      if (imageUrl.startsWith('/uploads/vehicles/')) {
+        try {
+          const response = await axios.post(DELETE_VEHICLE_IMAGE_URL, {
+            image_path: imageUrl
+          }, {
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Secret': EMAIL_API_SECRET
+            },
+            timeout: 10000
+          });
+          console.log('Vehicle image deletion response:', response.data);
+        } catch (fileError) {
+          // Logiraj ali ne prekidaj - slika mozda vec ne postoji
+          console.error('Vehicle image deletion warning:', fileError.response?.data || fileError.message);
+        }
+      }
+      
+      // 2b. Ako je slika lokalna, obrisi lokalno
+      if (imageUrl.startsWith('/uploads/')) {
+        const imgPath = path.join(__dirname, '..', '..', imageUrl);
+        try {
+          if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath);
+        } catch (localErr) {
+          console.error('Local image delete error:', localErr.message);
+        }
+      }
     }
     
+    // 3. Obrisi vozilo iz baze
     await pool.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
     res.json({ message: 'Vehicle deleted successfully' });
   } catch (error) {
+    console.error('Delete vehicle error:', error);
     res.status(500).json({ error: 'Failed to delete vehicle' });
   }
 });
