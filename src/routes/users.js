@@ -87,6 +87,17 @@ router.get('/:id', authenticate, authorizeEntity('users'), async (req, res) => {
   }
 });
 
+router.get('/list', authenticate, async (req, res) => {
+  try {
+    const [users] = await pool.execute(
+      'SELECT id, name, type FROM users WHERE active = 1 ORDER BY name ASC'
+    );
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
 router.post('/', authenticate, authorizeEntity('users'), requireAdmin, async (req, res) => {
   try {
     const { 
