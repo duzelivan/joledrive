@@ -11,52 +11,34 @@ const canEdit = (req) => isAdmin(req) || req.user?.permissions?.['settings.edit'
 
 // ============================================
 // GET /api/settings/notification-emails
+// CITA IZ settings TABLICE (ne company_settings!)
 // ============================================
 router.get('/notification-emails', authenticate, async (req, res) => {
   try {
     let emails = [];
-    let source = 'none';
 
-    // Pokušaj 1: Zasebna tablica notification_emails (stari backend)
-    try {
-      const [rows] = await pool.execute('SELECT email FROM notification_emails ORDER BY id');
-      if (rows.length > 0) {
-        emails = rows.map(r => r.email);
-        source = 'notification_emails table';
-      }
-    } catch (e) {
-      // Tablica ne postoji — ignoriraj
-    }
+    // Cita iz settings tablice - OVDJE BACKEND TRAZI
+    const [rows] = await pool.execute(
+      'SELECT setting_value FROM settings WHERE setting_key = ?',
+      ['notification_emails']
+    );
 
-    // Pokušaj 2: company_settings (novi backend)
-    if (emails.length === 0) {
+    if (rows.length > 0 && rows[0].setting_value) {
+      const val = rows[0].setting_value;
+      // Moze biti JSON array ili comma-separated string
       try {
-        const [rows] = await pool.execute(
-          'SELECT setting_value FROM company_settings WHERE setting_key = ?',
-          ['notification_emails']
-        );
-        if (rows[0]?.setting_value) {
-          try {
-            const parsed = JSON.parse(rows[0].setting_value);
-            if (Array.isArray(parsed)) {
-              emails = parsed;
-              source = 'company_settings JSON';
-            }
-          } catch (e) {
-            // Nije validan JSON — možda je plain string
-            const val = rows[0].setting_value;
-            if (val.includes('@')) {
-              emails = [val];
-              source = 'company_settings string';
-            }
-          }
+        const parsed = JSON.parse(val);
+        if (Array.isArray(parsed)) {
+          emails = parsed;
+        } else {
+          emails = [val];
         }
       } catch (e) {
-        // Ignoriraj
+        // Nije JSON, tretiraj kao CSV
+        emails = val.split(',').map(e => e.trim()).filter(e => e);
       }
     }
 
-    console.log(`[EMAILS] GET: ${emails.length} emailova iz ${source}`);
     res.json({ emails });
   } catch (error) {
     console.error('Fetch emails error:', error);
@@ -66,6 +48,7 @@ router.get('/notification-emails', authenticate, async (req, res) => {
 
 // ============================================
 // POST /api/settings/notification-emails
+// PISE U settings TABLICU (ne company_settings!)
 // ============================================
 router.post('/notification-emails', authenticate, async (req, res) => {
   try {
@@ -76,50 +59,40 @@ router.post('/notification-emails', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Valid email required' });
     }
 
-    let emails = [];
-    let useTable = false;
+    // Procitaj trenutne iz settings tablice
+    const [rows] = await pool.execute(
+      'SELECT setting_value FROM settings WHERE setting_key = ?',
+      ['notification_emails']
+    );
 
-    // Pokušaj 1: Zasebna tablica
-    try {
-      const [existing] = await pool.execute('SELECT email FROM notification_emails');
-      emails = existing.map(r => r.email);
-      useTable = true;
-    } catch (e) {
-      // Tablica ne postoji
+    let emails = [];
+    if (rows.length > 0 && rows[0].setting_value) {
+      const val = rows[0].setting_value;
+      try {
+        const parsed = JSON.parse(val);
+        if (Array.isArray(parsed)) emails = parsed;
+        else emails = val.split(',').map(e => e.trim()).filter(e => e);
+      } catch (e) {
+        emails = val.split(',').map(e => e.trim()).filter(e => e);
+      }
     }
 
     if (emails.includes(email)) {
       return res.status(400).json({ error: 'Email already exists' });
     }
 
-    if (useTable) {
-      // Spremi u tablicu
-      await pool.execute('INSERT INTO notification_emails (email) VALUES (?)', [email]);
-      emails.push(email);
-      console.log(`[EMAILS] POST: dodan u tablicu: ${email}`);
-    } else {
-      // Spremi u company_settings
-      const [rows] = await pool.execute(
-        'SELECT setting_value FROM company_settings WHERE setting_key = ?',
-        ['notification_emails']
-      );
-      emails = rows[0]?.setting_value ? JSON.parse(rows[0].setting_value) : [];
-      
-      if (emails.includes(email)) {
-        return res.status(400).json({ error: 'Email already exists' });
-      }
-      
-      emails.push(email);
-      
-      await pool.execute(
-        `INSERT INTO company_settings (setting_key, setting_value) 
-         VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
-        ['notification_emails', JSON.stringify(emails)]
-      );
-      console.log(`[EMAILS] POST: dodan u company_settings: ${email}`);
-    }
-    
+    emails.push(email);
+    const newValue = emails.join(',');
+
+    // Spremi u settings tablicu - OVDJE BACKEND CITA
+    await pool.execute(
+      `INSERT INTO settings (setting_key, setting_value) 
+       VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
+      ['notification_emails', newValue]
+    );
+
+    console.log(`[EMAILS] Dodan: ${email}`);
     res.json({ emails });
   } catch (error) {
     console.error('Add email error:', error);
@@ -129,44 +102,44 @@ router.post('/notification-emails', authenticate, async (req, res) => {
 
 // ============================================
 // DELETE /api/settings/notification-emails/:email
+// BRISE IZ settings TABLICE (ne company_settings!)
 // ============================================
 router.delete('/notification-emails/:email', authenticate, async (req, res) => {
   try {
     if (!canEdit(req)) return res.status(403).json({ error: 'No permission' });
     
     const email = decodeURIComponent(req.params.email);
+
+    // Procitaj trenutne iz settings tablice
+    const [rows] = await pool.execute(
+      'SELECT setting_value FROM settings WHERE setting_key = ?',
+      ['notification_emails']
+    );
+
     let emails = [];
-    let useTable = false;
-
-    // Pokušaj 1: Zasebna tablica
-    try {
-      await pool.execute('DELETE FROM notification_emails WHERE email = ?', [email]);
-      const [rows] = await pool.execute('SELECT email FROM notification_emails');
-      emails = rows.map(r => r.email);
-      useTable = true;
-      console.log(`[EMAILS] DELETE: obrisan iz tablice: ${email}`);
-    } catch (e) {
-      // Tablica ne postoji
+    if (rows.length > 0 && rows[0].setting_value) {
+      const val = rows[0].setting_value;
+      try {
+        const parsed = JSON.parse(val);
+        if (Array.isArray(parsed)) emails = parsed;
+        else emails = val.split(',').map(e => e.trim()).filter(e => e);
+      } catch (e) {
+        emails = val.split(',').map(e => e.trim()).filter(e => e);
+      }
     }
 
-    if (!useTable) {
-      // Pokušaj 2: company_settings
-      const [rows] = await pool.execute(
-        'SELECT setting_value FROM company_settings WHERE setting_key = ?',
-        ['notification_emails']
-      );
-      emails = rows[0]?.setting_value ? JSON.parse(rows[0].setting_value) : [];
-      emails = emails.filter(e => e !== email);
-      
-      await pool.execute(
-        `INSERT INTO company_settings (setting_key, setting_value) 
-         VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
-        ['notification_emails', JSON.stringify(emails)]
-      );
-      console.log(`[EMAILS] DELETE: obrisan iz company_settings: ${email}`);
-    }
-    
+    emails = emails.filter(e => e !== email);
+    const newValue = emails.join(',');
+
+    // Azuriraj settings tablicu
+    await pool.execute(
+      `INSERT INTO settings (setting_key, setting_value) 
+       VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
+      ['notification_emails', newValue]
+    );
+
+    console.log(`[EMAILS] Obrisan: ${email}`);
     res.json({ emails });
   } catch (error) {
     console.error('Delete email error:', error);
@@ -176,6 +149,7 @@ router.delete('/notification-emails/:email', authenticate, async (req, res) => {
 
 // ============================================
 // GET /api/settings/company - Podaci tvrtke
+// CITA IZ company_settings TABLICE
 // ============================================
 router.get('/company', authenticate, async (req, res) => {
   try {
@@ -197,6 +171,7 @@ router.get('/company', authenticate, async (req, res) => {
 
 // ============================================
 // PUT /api/settings/company - Spremi podatke tvrtke
+// PISE U company_settings TABLICU
 // ============================================
 router.put('/company', authenticate, async (req, res) => {
   try {
@@ -290,7 +265,7 @@ router.put('/service-intervals', authenticate, async (req, res) => {
 });
 
 // ============================================
-// GET /api/settings/system - Sistemske info
+// GET /api/settings/system - Sistemske info (admin only)
 // ============================================
 router.get('/system', authenticate, async (req, res) => {
   try {
@@ -325,7 +300,7 @@ router.get('/system', authenticate, async (req, res) => {
 });
 
 // ============================================
-// POST /api/settings/clear-cache
+// POST /api/settings/clear-cache (admin only)
 // ============================================
 router.post('/clear-cache', authenticate, async (req, res) => {
   try {
