@@ -47,6 +47,7 @@ router.post('/upload', authenticate, upload.single('image'), (req, res) => {
 
 router.get('/', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
+    const active = req.query.active === '0' ? 0 : 1;
     const [vehicles] = await pool.execute(
       `SELECT v.*, u.name as assigned_name,
         (SELECT s.status FROM services s 
@@ -56,11 +57,37 @@ router.get('/', authenticate, authorizeEntity('vehicles'), async (req, res) => {
          LIMIT 1) as service_status
        FROM vehicles v 
        LEFT JOIN users u ON v.assigned_to = u.id 
-       ORDER BY v.created_at DESC`
+       WHERE v.active = ?
+       ORDER BY v.created_at DESC`,
+      [active]
     );
     res.json(vehicles);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch vehicles' });
+  }
+});
+
+router.put('/:id/archive', authenticate, async (req, res) => {
+  try {
+    await pool.execute(
+      'UPDATE vehicles SET active = 0 WHERE id = ?',
+      [req.params.id]
+    );
+    res.json({ success: true, message: 'Vozilo arhivirano' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.put('/:id/restore', authenticate, async (req, res) => {
+  try {
+    await pool.execute(
+      'UPDATE vehicles SET active = 1 WHERE id = ?',
+      [req.params.id]
+    );
+    res.json({ success: true, message: 'Vozilo aktivirano' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
