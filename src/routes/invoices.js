@@ -38,7 +38,6 @@ async function enrichInvoiceWithPayments(invoice) {
 router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
     const { status, vehicle_id, search, invoice_type } = req.query;
-    // POPRAVLJENO: dodan LEFT JOIN users za user_name
     let query = `SELECT i.*, v.manufacturer, v.model, v.license_plate, u.name as user_name 
                  FROM invoices i 
                  LEFT JOIN vehicles v ON i.vehicle_id = v.id 
@@ -115,7 +114,7 @@ router.get('/:id', authenticate, authorizeEntity('invoices'), async (req, res) =
 });
 
 // ============================================
-// POST /api/invoices - bez promjena
+// POST /api/invoices - POPRAVLJENO: debug logging za user_id
 // ============================================
 router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices.create']), async (req, res) => {
   try {
@@ -126,15 +125,28 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
       invoice_type = 'income'
     } = req.body;
 
+    // DEBUG: logiraj sto smo primili
+    console.log('[POST /api/invoices] Received body:', JSON.stringify(req.body, null, 2));
+    console.log('[POST /api/invoices] user_id received:', user_id, '| type:', typeof user_id);
+    console.log('[POST /api/invoices] vehicle_id received:', vehicle_id, '| type:', typeof vehicle_id);
+
+    // Osiguraj da su ID-evi brojevi ili null
+    const parsedUserId = user_id ? parseInt(user_id, 10) : null;
+    const parsedVehicleId = vehicle_id ? parseInt(vehicle_id, 10) : null;
+    
+    console.log('[POST /api/invoices] parsedUserId:', parsedUserId, '| parsedVehicleId:', parsedVehicleId);
+
     const [result] = await pool.execute(
       `INSERT INTO invoices (invoice_number, description, amount, vehicle_id, user_id, 
         due_date, status, recurring_type, recurring_interval, file_path, file_size, file_type, 
         created_by, invoice_type) 
        VALUES (?, ?, ?, ?, ?, ?, 'unpaid', ?, ?, ?, ?, ?, ?, ?)`,
-      [invoice_number, description, amount, vehicle_id || null, user_id || null,
+      [invoice_number, description, amount, parsedVehicleId, parsedUserId,
        due_date, recurring_type || null, recurring_interval || null,
        file_path || null, file_size || null, file_type || null, req.user.id, invoice_type]
     );
+
+    console.log('[POST /api/invoices] Invoice created:', result.insertId, 'with user_id:', parsedUserId);
 
     res.status(201).json({ id: result.insertId, message: 'Invoice created successfully' });
   } catch (error) {
@@ -143,9 +155,7 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
   }
 });
 
-// ============================================
 // Payments - bez promjena
-// ============================================
 router.post('/:id/payments', authenticate, authorizeEntity('invoices'), authorize(['invoices.edit']), async (req, res) => {
   try {
     const { amount, payment_date, payment_method, notes } = req.body;
@@ -295,9 +305,7 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
   }
 });
 
-// ============================================
 // DELETE - bez promjena
-// ============================================
 router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoices.delete']), async (req, res) => {
   try {
     const [invoiceRows] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [req.params.id]);
