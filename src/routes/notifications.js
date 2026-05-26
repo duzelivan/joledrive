@@ -4,13 +4,26 @@ const { sendEmail } = require('../utils/email');
 const { authenticate, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
+// POPRAVLJENO: Koristi company_settings umjesto settings tablice
 async function getNotificationEmails() {
-  const [rows] = await pool.execute(
-    'SELECT setting_value FROM settings WHERE setting_key = ?',
-    ['notification_emails']
-  );
-  if (rows.length === 0) return [];
-  return rows[0].setting_value.split(',').map(e => e.trim()).filter(e => e);
+  try {
+    const [rows] = await pool.execute(
+      'SELECT setting_value FROM company_settings WHERE setting_key = ?',
+      ['notification_emails']
+    );
+    if (rows.length === 0 || !rows[0].setting_value) return [];
+    const val = rows[0].setting_value;
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (e) {
+      // Nije JSON, tretiraj kao CSV
+    }
+    return val.split(',').map(e => e.trim()).filter(e => e);
+  } catch (error) {
+    console.error('[getNotificationEmails] Error:', error.message);
+    return [];
+  }
 }
 
 router.post('/send-reminders', authenticate, authorizeEntity('settings'), async (req, res) => {
@@ -51,13 +64,13 @@ router.post('/send-reminders', authenticate, authorizeEntity('settings'), async 
       const now = new Date();
 
       if (regDate <= now) alerts.push(`Registracija ISTEKLA (${vehicle.registration_date})`);
-      else if (regDate <= new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)) alerts.push(`Registracija ističe za ${Math.ceil((regDate - now) / (1000 * 60 * 60 * 24))} dana`);
+      else if (regDate <= new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)) alerts.push(`Registracija istice za ${Math.ceil((regDate - now) / (1000 * 60 * 60 * 24))} dana`);
 
-      if (yellowDate <= now) alerts.push(`Žuti karton ISTEKAO (${vehicle.yellow_card_date})`);
-      else if (yellowDate <= new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)) alerts.push(`Žuti karton ističe za ${Math.ceil((yellowDate - now) / (1000 * 60 * 60 * 24))} dana`);
+      if (yellowDate <= now) alerts.push(`Zuti karton ISTEKAO (${vehicle.yellow_card_date})`);
+      else if (yellowDate <= new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)) alerts.push(`Zuti karton istice za ${Math.ceil((yellowDate - now) / (1000 * 60 * 60 * 24))} dana`);
 
       if (ppDate <= now) alerts.push(`PP aparat ISTEKAO (${vehicle.pp_apparatus_date})`);
-      else if (ppDate <= new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)) alerts.push(`PP aparat ističe za ${Math.ceil((ppDate - now) / (1000 * 60 * 60 * 24))} dana`);
+      else if (ppDate <= new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)) alerts.push(`PP aparat istice za ${Math.ceil((ppDate - now) / (1000 * 60 * 60 * 24))} dana`);
 
       if (alerts.length === 0) continue;
 
@@ -66,16 +79,16 @@ router.post('/send-reminders', authenticate, authorizeEntity('settings'), async 
         `JoleDrive - Obavijest za ${vehicle.manufacturer} ${vehicle.model}`,
         `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #dc2626;">🔔 JoleDrive Obavijest</h2>
-            <p>Poštovani,</p>
-            <p>Sljedeće stavke zahtijevaju pažnju za vozilo:</p>
+            <h2 style="color: #dc2626;">JoleDrive Obavijest</h2>
+            <p>Postovani,</p>
+            <p>Sljedece stavke zahtijevaju paznju za vozilo:</p>
             
             <div style="background: #f3f4f6; padding: 16px; border-radius: 8px; margin: 16px 0;">
               <h3 style="margin-top: 0; color: #1f2937;">
                 ${vehicle.manufacturer} ${vehicle.model}
                 <span style="color: #6b7280; font-size: 14px;">(${vehicle.license_plate || '---'})</span>
               </h3>
-              ${vehicle.assigned_name ? `<p><strong>Zadužio:</strong> ${vehicle.assigned_name}</p>` : ''}
+              ${vehicle.assigned_name ? `<p><strong>Zaduzio:</strong> ${vehicle.assigned_name}</p>` : ''}
               <ul style="color: #dc2626;">
                 ${alerts.map(a => `<li>${a}</li>`).join('')}
               </ul>
