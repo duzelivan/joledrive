@@ -173,28 +173,32 @@ router.get('/analytics', authenticate, async (req, res) => {
     if (period === 'week' && month) {
       // Po tjednima unutar mjeseca
       const [incomeData] = await pool.execute(`
-        SELECT WEEK(created_at) as period, SUM(amount) as total
-        FROM invoices WHERE invoice_type = 'income' AND YEAR(created_at) = ? AND MONTH(created_at) = ?
-        GROUP BY WEEK(created_at)
+        SELECT WEEK(p.payment_date) as period, COALESCE(SUM(p.amount), 0) as total
+        FROM invoice_payments p
+        JOIN invoices i ON p.invoice_id = i.id
+        WHERE i.invoice_type = 'income' AND YEAR(p.payment_date) = ? AND MONTH(p.payment_date) = ?
+        GROUP BY WEEK(p.payment_date)
       `, [selectedYear, month]);
       const [expenseData] = await pool.execute(`
-        SELECT WEEK(created_at) as period, SUM(amount) as total
-        FROM invoices WHERE invoice_type = 'expense' AND YEAR(created_at) = ? AND MONTH(created_at) = ?
-        GROUP BY WEEK(created_at)
+        SELECT WEEK(due_date) as period, COALESCE(SUM(amount), 0) as total
+        FROM invoices WHERE invoice_type = 'expense' AND YEAR(due_date) = ? AND MONTH(due_date) = ?
+        GROUP BY WEEK(due_date)
       `, [selectedYear, month]);
       income = incomeData;
       expenses = expenseData;
     } else {
-      // Po mjesecima (default)
+      // Po mjesecima (default) — prihod = SAMO uplaćeni iznosi
       const [incomeData] = await pool.execute(`
-        SELECT MONTH(created_at) as period, SUM(amount) as total
-        FROM invoices WHERE invoice_type = 'income' AND YEAR(created_at) = ?
-        GROUP BY MONTH(created_at)
+        SELECT MONTH(p.payment_date) as period, COALESCE(SUM(p.amount), 0) as total
+        FROM invoice_payments p
+        JOIN invoices i ON p.invoice_id = i.id
+        WHERE i.invoice_type = 'income' AND YEAR(p.payment_date) = ?
+        GROUP BY MONTH(p.payment_date)
       `, [selectedYear]);
       const [expenseData] = await pool.execute(`
-        SELECT MONTH(created_at) as period, SUM(amount) as total
-        FROM invoices WHERE invoice_type = 'expense' AND YEAR(created_at) = ?
-        GROUP BY MONTH(created_at)
+        SELECT MONTH(due_date) as period, COALESCE(SUM(amount), 0) as total
+        FROM invoices WHERE invoice_type = 'expense' AND YEAR(due_date) = ?
+        GROUP BY MONTH(due_date)
       `, [selectedYear]);
       income = incomeData;
       expenses = expenseData;
