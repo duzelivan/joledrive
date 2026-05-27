@@ -256,4 +256,94 @@ router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['veh
   }
 });
 
+// ============================================
+// SERVISNA KNJIGA - sve informacije o vozilu
+// ============================================
+router.get('/:id/service-book', authenticate, authorizeEntity('vehicles'), async (req, res) => {
+  try {
+    // 1. Podaci o vozilu
+    const [vehicles] = await pool.execute(
+      `SELECT v.*, u.name as assigned_user_name
+       FROM vehicles v
+       LEFT JOIN users u ON v.assigned_to = u.id
+       WHERE v.id = ?`,
+      [req.params.id]
+    );
+    if (vehicles.length === 0) return res.status(404).json({ error: 'Vehicle not found' });
+    const vehicle = vehicles[0];
+
+    // 2. Servisi (najnoviji prvi)
+    const [services] = await pool.execute(
+      `SELECT s.*, u.name as mechanic_name
+       FROM services s
+       LEFT JOIN users u ON s.mechanic_id = u.id
+       WHERE s.vehicle_id = ? AND s.status = 'completed'
+       ORDER BY s.service_date DESC`,
+      [req.params.id]
+    );
+
+    // Dohvati dijelove za svaki servis
+    for (const svc of services) {
+      const [parts] = await pool.execute(
+        `SELECT sp.*, p.name as part_name, p.part_number
+         FROM service_parts sp
+         JOIN warehouse p ON sp.part_id = p.id
+         WHERE sp.service_id = ?`,
+        [svc.id]
+      );
+      svc.parts = parts;
+    }
+
+    // 3. Zaduženja / evidencija vožnji
+    const [assignments] = await pool.execute(
+      `SELECT va.*, u.name as user_name
+       FROM vehicle_assignments va
+       LEFT JOIN users u ON va.user_id = u.id
+       WHERE va.vehicle_id = ?
+       ORDER BY va.assigned_at DESC`,
+      [req.params.id]
+    );
+
+    // 4. Troškovi
+    const [expenses] = await pool.execute(
+      `SELECT * FROM vehicle_expenses
+       WHERE vehicle_id = ?
+       ORDER BY expense_date DESC`,
+      [req.params.id]
+    );
+
+    // 5. Prihodi (računi)
+    const [income] = await pool.execute(
+      `SELECT i.* FROM invoices i
+       WHERE i.vehicle_id = ? AND i.invoice_type = 'income'
+       ORDER BY i.created_at DESC`,
+      [req.params.id]
+    );
+
+    // 6. Ukupne statistike
+    const totalServices = services.length;
+    const totalServiceCost = services.reduce((s, v) => s + parseFloat(v.total_cost || 0), 0);
+    const totalExpenses = expenses.reduce((s, v) => s + parseFloat(v.amount || 0), 0);
+    const totalIncome = income.reduce((s, v) => s + parseFloat(v.amount || 0), 0);
+
+    res.json({
+      vehicle,
+      services,
+      assignments,
+      expenses,
+      income,
+      stats: {
+        total_services: totalServices,
+        total_service_cost: totalServiceCost,
+        total_expenses: totalExpenses,
+        total_income: totalIncome,
+        total_km: assignments.reduce((s, a) => s + (a.end_mileage && a.start_mileage ? a.end_mileage - a.start_mileage : 0), 0)
+      }
+    });
+  } catch (error) {
+    console.error('Service book error:', error);
+    res.status(500).json({ error: 'Failed to load service book' });
+  }
+});
+
 module.exports = router;
