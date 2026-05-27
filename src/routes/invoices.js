@@ -131,7 +131,8 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
 
       for (let seq = 1; seq <= totalOccurrences; seq++) {
         let occurrenceDate = new Date(startDate);
-        const offset = seq - 1;
+        // offset = seq (prvi recurring ide od due_date + 1 interval, jer due_date već ima originalni račun)
+        const offset = seq;
 
         switch (recurring_type) {
           case 'daily':
@@ -276,7 +277,7 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
 
         for (let seq = 1; seq <= totalOccurrences; seq++) {
           let occurrenceDate = new Date(startDate);
-          const offset = seq - 1;
+          const offset = seq;  // prvi recurring = due_date + 1 interval
 
           switch (recurring_type) {
             case 'daily':
