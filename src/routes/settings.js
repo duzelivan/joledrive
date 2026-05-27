@@ -3,6 +3,7 @@ const pool = require('../config/database');
 const { authenticate, authorize, authorizeEntity } = require('../middleware/auth');
 const router = express.Router();
 
+// Dohvati sve postavke (settings + company_settings)
 router.get('/', authenticate, authorizeEntity('settings'), async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT setting_key, setting_value FROM settings');
@@ -10,7 +11,15 @@ router.get('/', authenticate, authorizeEntity('settings'), async (req, res) => {
     rows.forEach(row => {
       settings[row.setting_key] = row.setting_value;
     });
-    res.json(settings);
+
+    // Dohvati i company_settings
+    const [companyRows] = await pool.execute('SELECT setting_key, setting_value FROM company_settings');
+    const company = {};
+    companyRows.forEach(row => {
+      company[row.setting_key] = row.setting_value;
+    });
+
+    res.json({ ...settings, company });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch settings' });
   }
@@ -117,6 +126,38 @@ router.delete('/notification-emails/:email', authenticate, authorizeEntity('sett
     res.json({ message: 'Email removed', emails: filtered });
   } catch (error) {
     res.status(500).json({ error: 'Failed to remove email' });
+  }
+});
+
+// Dohvati podatke o firmi
+router.get('/company', authenticate, authorizeEntity('settings'), async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT setting_key, setting_value FROM company_settings');
+    const company = {};
+    rows.forEach(row => { company[row.setting_key] = row.setting_value; });
+    res.json(company);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch company settings' });
+  }
+});
+
+// Spremi podatke o firmi
+router.put('/company', authenticate, authorizeEntity('settings'), authorize(['settings.edit']), async (req, res) => {
+  try {
+    const { company_name, company_address, company_oib, company_email, company_phone } = req.body;
+    const fields = { company_name, company_address, company_oib, company_email, company_phone };
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (value !== undefined) {
+        await pool.execute(
+          'INSERT INTO company_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = ?',
+          [key, value, value]
+        );
+      }
+    }
+    res.json({ message: 'Company settings updated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update company settings' });
   }
 });
 
