@@ -124,23 +124,47 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
       ]
     );
 
-    // Ako ima ponavljanje, kreiraj invoice_recurrences zapis
+    // Ako ima ponavljanje, kreiraj SVE invoice_recurrences zapise
     if (recurring_type && recurring_type !== 'none') {
-      await pool.execute(
-        `INSERT INTO invoice_recurrences 
-          (parent_invoice_id, sequence_number, total_occurrences, due_date, description, status, next_date, active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          result.insertId, 
-          1, 
-          999, 
-          due_date || new Date(), 
-          description || null, 
-          'pending', 
-          due_date || new Date(), 
-          1
-        ]
-      );
+      const totalOccurrences = parseInt(recurring_interval) <= 0 ? 1 : 999;
+      const startDate = new Date(due_date || new Date());
+      const interval = parseInt(recurring_interval) || 1;
+
+      for (let seq = 1; seq <= totalOccurrences; seq++) {
+        let occurrenceDate = new Date(startDate);
+        const offset = seq - 1;
+
+        switch (recurring_type) {
+          case 'daily':
+            occurrenceDate.setDate(occurrenceDate.getDate() + (offset * interval));
+            break;
+          case 'weekly':
+            occurrenceDate.setDate(occurrenceDate.getDate() + (offset * interval * 7));
+            break;
+          case 'monthly':
+            occurrenceDate.setMonth(occurrenceDate.getMonth() + (offset * interval));
+            break;
+          case 'yearly':
+            occurrenceDate.setFullYear(occurrenceDate.getFullYear() + (offset * interval));
+            break;
+        }
+
+        await pool.execute(
+          `INSERT INTO invoice_recurrences 
+            (parent_invoice_id, sequence_number, total_occurrences, due_date, description, status, next_date, active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            result.insertId,
+            seq,
+            totalOccurrences,
+            occurrenceDate.toISOString().split('T')[0],
+            description || null,
+            'pending',
+            occurrenceDate.toISOString().split('T')[0],
+            1
+          ]
+        );
+      }
     }
 
     // Ako je prihod, pove\u0107aj total_income vozila
@@ -243,24 +267,43 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
 
     // A\u017euriraj i recurring ako je potrebno
     if (recurring_type !== undefined) {
-      if (recurring_type === 'none') {
-        await pool.execute('DELETE FROM invoice_recurrences WHERE parent_invoice_id = ?', [req.params.id]);
-      } else {
-        const [existing] = await pool.execute(
-          'SELECT id FROM invoice_recurrences WHERE parent_invoice_id = ?',
-          [req.params.id]
-        );
-        if (existing.length > 0) {
-          await pool.execute(
-            'UPDATE invoice_recurrences SET due_date = ?, next_date = ? WHERE parent_invoice_id = ? AND status = ?',
-            [due_date || new Date(), due_date || new Date(), req.params.id, 'pending']
-          );
-        } else {
+      // Prvo obriši SVE stare zapise
+      await pool.execute('DELETE FROM invoice_recurrences WHERE parent_invoice_id = ?', [req.params.id]);
+
+      if (recurring_type !== 'none') {
+        // Kreiraj nove zapise od početka
+        const startDate = new Date(due_date || new Date());
+        const interval = parseInt(recurring_interval) || 1;
+
+        for (let seq = 1; seq <= 999; seq++) {
+          let occurrenceDate = new Date(startDate);
+          const offset = seq - 1;
+
+          switch (recurring_type) {
+            case 'daily':
+              occurrenceDate.setDate(occurrenceDate.getDate() + (offset * interval));
+              break;
+            case 'weekly':
+              occurrenceDate.setDate(occurrenceDate.getDate() + (offset * interval * 7));
+              break;
+            case 'monthly':
+              occurrenceDate.setMonth(occurrenceDate.getMonth() + (offset * interval));
+              break;
+            case 'yearly':
+              occurrenceDate.setFullYear(occurrenceDate.getFullYear() + (offset * interval));
+              break;
+          }
+
           await pool.execute(
             `INSERT INTO invoice_recurrences 
               (parent_invoice_id, sequence_number, total_occurrences, due_date, description, status, next_date, active)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.params.id, 1, 999, due_date || new Date(), description || null, 'pending', due_date || new Date(), 1]
+            [
+              req.params.id, seq, 999,
+              occurrenceDate.toISOString().split('T')[0],
+              description || null, 'pending',
+              occurrenceDate.toISOString().split('T')[0], 1
+            ]
           );
         }
       }
@@ -321,13 +364,13 @@ router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['inv
 // Dohvati sve recurring zapise (flat lista za frontend grupiranje)
 router.get('/recurring/list', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
-    // 1. Dohvati sve distinct parent račune koji imaju recurring
+    // 1. Dohvati sve parent račune s agregiranim podacima
     const [parents] = await pool.execute(
       `SELECT DISTINCT r.parent_invoice_id as id, i.invoice_number, i.description, i.amount, 
         i.vehicle_id, i.invoice_type, i.recurring_type, i.recurring_interval,
         v.manufacturer, v.model, v.license_plate,
         u.name as created_by_name,
-        MIN(r.next_date) as next_date, MAX(r.active) as active,
+        MAX(r.active) as active,
         COUNT(CASE WHEN r.status = 'pending' THEN 1 END) as pending_count,
         COUNT(CASE WHEN r.status = 'generated' THEN 1 END) as generated_count,
         MAX(r.total_occurrences) as total_occurrences
@@ -336,8 +379,19 @@ router.get('/recurring/list', authenticate, authorizeEntity('invoices'), async (
        LEFT JOIN vehicles v ON i.vehicle_id = v.id
        LEFT JOIN users u ON i.created_by = u.id
        GROUP BY r.parent_invoice_id
-       ORDER BY MIN(r.next_date) ASC`
+       ORDER BY MIN(r.due_date) ASC`
     );
+
+    // Dohvati next_date (prvi pending) za svakog parenta
+    for (const p of parents) {
+      const [nextPending] = await pool.execute(
+        `SELECT due_date FROM invoice_recurrences 
+         WHERE parent_invoice_id = ? AND status = 'pending' AND active = 1
+         ORDER BY sequence_number ASC LIMIT 1`,
+        [p.id]
+      );
+      p.next_date = nextPending.length > 0 ? nextPending[0].due_date : null;
+    }
 
     // 2. Za svakog parenta dohvati schedule (sve pojedinačne zapise)
     const enriched = await Promise.all(
@@ -398,7 +452,7 @@ router.put('/recurring/:parentId/stop-all', authenticate, authorizeEntity('invoi
   }
 });
 
-// Pokreni SVE recurring zapise pod tim parentom (uključujući reset preskočenih)
+// Pokreni SVE recurring zapise pod tim parentom (samo budući, ne prošli)
 router.put('/recurring/:parentId/start-all', authenticate, authorizeEntity('invoices'), authorize(['invoices.edit']), async (req, res) => {
   try {
     await pool.execute(
@@ -406,7 +460,7 @@ router.put('/recurring/:parentId/start-all', authenticate, authorizeEntity('invo
       [req.params.parentId]
     );
     await pool.execute(
-      "UPDATE invoice_recurrences SET status = 'pending' WHERE parent_invoice_id = ? AND status = 'cancelled'",
+      "UPDATE invoice_recurrences SET status = 'pending' WHERE parent_invoice_id = ? AND status = 'cancelled' AND due_date >= CURDATE()",
       [req.params.parentId]
     );
     await pool.execute(
