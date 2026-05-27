@@ -4,7 +4,7 @@ const { authenticate, authorize, authorizeEntity } = require('../middleware/auth
 const router = express.Router();
 
 // ============================================
-// Dohvati sve ra\u010dune
+// Dohvati sve račune
 // ============================================
 router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
@@ -35,7 +35,7 @@ router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
 
     const [invoices] = await pool.execute(query, params);
 
-    // Izra\u010dunaj status za svaki ra\u010dun
+    // Izračunaj status za svaki račun
     const enrichedInvoices = invoices.map(inv => {
       const paid = parseFloat(inv.paid_amount || 0);
       const total = parseFloat(inv.amount);
@@ -45,7 +45,7 @@ router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
       return { ...inv, status };
     });
 
-    // Filtriraj po statusu nakon izra\u010duna
+    // Filtriraj po statusu nakon izračuna
     let filtered = enrichedInvoices;
     if (status) {
       filtered = enrichedInvoices.filter(inv => inv.status === status);
@@ -59,7 +59,7 @@ router.get('/', authenticate, authorizeEntity('invoices'), async (req, res) => {
 });
 
 // ============================================
-// Dohvati jedan ra\u010dun
+// Dohvati jedan račun
 // ============================================
 router.get('/:id', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
@@ -85,7 +85,7 @@ router.get('/:id', authenticate, authorizeEntity('invoices'), async (req, res) =
     else if (paid > 0) invoice.status = 'partial';
     else invoice.status = 'unpaid';
 
-    // Dohvati uplate za ovaj ra\u010dun
+    // Dohvati uplate za ovaj račun
     const [payments] = await pool.execute(
       'SELECT * FROM invoice_payments WHERE invoice_id = ? ORDER BY payment_date DESC',
       [req.params.id]
@@ -100,7 +100,7 @@ router.get('/:id', authenticate, authorizeEntity('invoices'), async (req, res) =
 });
 
 // ============================================
-// Kreiraj novi ra\u010dun
+// Kreiraj novi račun
 // ============================================
 router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices.create']), async (req, res) => {
   try {
@@ -133,7 +133,7 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
       );
     }
 
-    // Ako je prihod, pove\u0107aj total_income vozila
+    // Ako je prihod, povećaj total_income vozila
     if (invoice_type !== 'expense' && vehicle_id) {
       await pool.execute(
         'UPDATE vehicles SET total_income = total_income + ? WHERE id = ?',
@@ -144,7 +144,7 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
         [vehicle_id]
       );
     }
-    // Ako je tro\u0161ak, pove\u0107aj total_expenses
+    // Ako je trošak, povećaj total_expenses
     if (invoice_type === 'expense' && vehicle_id) {
       await pool.execute(
         'UPDATE vehicles SET total_expenses = total_expenses + ? WHERE id = ?',
@@ -164,7 +164,7 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
 });
 
 // ============================================
-// UREDI RA\u010cUN (NOVO)
+// UREDI RAČUN (NOVO)
 // ============================================
 router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoices.edit']), async (req, res) => {
   try {
@@ -172,7 +172,7 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
       recurring_type, recurring_interval, file_path, file_size, file_type,
       invoice_type } = req.body;
 
-    // Dohvati trenutni ra\u010dun da znamo staru vrijednost
+    // Dohvati trenutni račun da znamo staru vrijednost
     const [current] = await pool.execute(
       'SELECT * FROM invoices WHERE id = ?',
       [req.params.id]
@@ -182,7 +182,7 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
     }
     const oldInvoice = current[0];
 
-    // Izra\u010dunaj razliku u iznosu za a\u017euriranje vozila
+    // Izračunaj razliku u iznosu za ažuriranje vozila
     const oldAmount = parseFloat(oldInvoice.amount || 0);
     const newAmount = parseFloat(amount || oldAmount);
     const amountDiff = newAmount - oldAmount;
@@ -212,7 +212,7 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
 
     await pool.execute(`UPDATE invoices SET ${updates.join(', ')} WHERE id = ?`, values);
 
-    // A\u017euriraj financije vozila ako se promijenio iznos
+    // Ažuriraj financije vozila ako se promijenio iznos
     if (amountDiff !== 0 && oldInvoice.vehicle_id) {
       if (oldInvoice.invoice_type === 'expense') {
         await pool.execute(
@@ -231,7 +231,7 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
       );
     }
 
-    // A\u017euriraj i recurring ako je potrebno
+    // Ažuriraj i recurring ako je potrebno
     if (recurring_type !== undefined) {
       if (recurring_type === 'none') {
         await pool.execute('DELETE FROM invoice_recurrences WHERE invoice_id = ?', [req.params.id]);
@@ -263,7 +263,7 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
 });
 
 // ============================================
-// Obriši ra\u010dun
+// Obriši račun
 // ============================================
 router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoices.delete']), async (req, res) => {
   try {
@@ -272,7 +272,7 @@ router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['inv
 
     const inv = invoice[0];
 
-    // A\u017euriraj financije vozila prije brisanja
+    // Ažuriraj financije vozila prije brisanja
     if (inv.vehicle_id) {
       if (inv.invoice_type === 'expense') {
         await pool.execute(
@@ -304,7 +304,75 @@ router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['inv
 });
 
 // ============================================
-// Zabilje\u017ei uplatu
+// RECURRING RAČUNI - API
+// ============================================
+
+// Dohvati sve recurring račune
+router.get('/recurring/list', authenticate, authorizeEntity('invoices'), async (req, res) => {
+  try {
+    const [recurrences] = await pool.execute(
+      `SELECT r.*, i.invoice_number, i.description, i.amount, i.vehicle_id, i.invoice_type,
+        v.manufacturer, v.model, v.license_plate,
+        u.name as created_by_name
+       FROM invoice_recurrences r
+       JOIN invoices i ON r.invoice_id = i.id
+       LEFT JOIN vehicles v ON i.vehicle_id = v.id
+       LEFT JOIN users u ON r.created_by = u.id
+       ORDER BY r.next_date ASC`
+    );
+
+    // Dohvati broj generiranih računa za svaki recurring
+    const enriched = await Promise.all(
+      recurrences.map(async (rec) => {
+        const [count] = await pool.execute(
+          `SELECT COUNT(*) as generated_count 
+           FROM invoices 
+           WHERE invoice_number LIKE ? AND id != ?`,
+          [`${rec.invoice_number}-%`, rec.invoice_id]
+        );
+        return { ...rec, generated_count: count[0].generated_count };
+      })
+    );
+
+    res.json(enriched);
+  } catch (error) {
+    console.error('Fetch recurring error:', error);
+    res.status(500).json({ error: 'Failed to fetch recurring invoices' });
+  }
+});
+
+// Zaustavi/pokreni recurring račun
+router.put('/recurring/:id/toggle', authenticate, authorizeEntity('invoices'), authorize(['invoices.edit']), async (req, res) => {
+  try {
+    const [rec] = await pool.execute('SELECT active FROM invoice_recurrences WHERE id = ?', [req.params.id]);
+    if (rec.length === 0) return res.status(404).json({ error: 'Not found' });
+    
+    const newActive = rec[0].active === 0 ? 1 : 0;
+    await pool.execute('UPDATE invoice_recurrences SET active = ? WHERE id = ?', [newActive, req.params.id]);
+    
+    res.json({ 
+      message: newActive === 1 ? 'Recurring activated' : 'Recurring stopped',
+      active: newActive 
+    });
+  } catch (error) {
+    console.error('Toggle recurring error:', error);
+    res.status(500).json({ error: 'Failed to toggle recurring' });
+  }
+});
+
+// Obriši recurring račun
+router.delete('/recurring/:id', authenticate, authorizeEntity('invoices'), authorize(['invoices.delete']), async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM invoice_recurrences WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Recurring deleted' });
+  } catch (error) {
+    console.error('Delete recurring error:', error);
+    res.status(500).json({ error: 'Failed to delete recurring' });
+  }
+});
+
+// ============================================
+// Zabilježi uplatu
 // ============================================
 router.post('/:id/payments', authenticate, authorizeEntity('invoices'), async (req, res) => {
   try {
