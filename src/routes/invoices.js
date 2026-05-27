@@ -124,11 +124,10 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
       ]
     );
 
-    // Ako ima ponavljanje, kreiraj SVE invoice_recurrences zapise
+    // Ako ima ponavljanje, kreiraj točno N invoice_recurrences zapisa
     if (recurring_type && recurring_type !== 'none') {
-      const totalOccurrences = parseInt(recurring_interval) <= 0 ? 1 : 999;
+      const totalOccurrences = parseInt(recurring_interval) || 1;
       const startDate = new Date(due_date || new Date());
-      const interval = parseInt(recurring_interval) || 1;
 
       for (let seq = 1; seq <= totalOccurrences; seq++) {
         let occurrenceDate = new Date(startDate);
@@ -136,16 +135,16 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
 
         switch (recurring_type) {
           case 'daily':
-            occurrenceDate.setDate(occurrenceDate.getDate() + (offset * interval));
+            occurrenceDate.setDate(occurrenceDate.getDate() + offset);
             break;
           case 'weekly':
-            occurrenceDate.setDate(occurrenceDate.getDate() + (offset * interval * 7));
+            occurrenceDate.setDate(occurrenceDate.getDate() + (offset * 7));
             break;
           case 'monthly':
-            occurrenceDate.setMonth(occurrenceDate.getMonth() + (offset * interval));
+            occurrenceDate.setMonth(occurrenceDate.getMonth() + offset);
             break;
           case 'yearly':
-            occurrenceDate.setFullYear(occurrenceDate.getFullYear() + (offset * interval));
+            occurrenceDate.setFullYear(occurrenceDate.getFullYear() + offset);
             break;
         }
 
@@ -271,26 +270,26 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
       await pool.execute('DELETE FROM invoice_recurrences WHERE parent_invoice_id = ?', [req.params.id]);
 
       if (recurring_type !== 'none') {
-        // Kreiraj nove zapise od početka
+        // Kreiraj točno N novih zapisa
+        const totalOccurrences = parseInt(recurring_interval) || 1;
         const startDate = new Date(due_date || new Date());
-        const interval = parseInt(recurring_interval) || 1;
 
-        for (let seq = 1; seq <= 999; seq++) {
+        for (let seq = 1; seq <= totalOccurrences; seq++) {
           let occurrenceDate = new Date(startDate);
           const offset = seq - 1;
 
           switch (recurring_type) {
             case 'daily':
-              occurrenceDate.setDate(occurrenceDate.getDate() + (offset * interval));
+              occurrenceDate.setDate(occurrenceDate.getDate() + offset);
               break;
             case 'weekly':
-              occurrenceDate.setDate(occurrenceDate.getDate() + (offset * interval * 7));
+              occurrenceDate.setDate(occurrenceDate.getDate() + (offset * 7));
               break;
             case 'monthly':
-              occurrenceDate.setMonth(occurrenceDate.getMonth() + (offset * interval));
+              occurrenceDate.setMonth(occurrenceDate.getMonth() + offset);
               break;
             case 'yearly':
-              occurrenceDate.setFullYear(occurrenceDate.getFullYear() + (offset * interval));
+              occurrenceDate.setFullYear(occurrenceDate.getFullYear() + offset);
               break;
           }
 
@@ -299,7 +298,7 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
               (parent_invoice_id, sequence_number, total_occurrences, due_date, description, status, next_date, active)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-              req.params.id, seq, 999,
+              req.params.id, seq, totalOccurrences,
               occurrenceDate.toISOString().split('T')[0],
               description || null, 'pending',
               occurrenceDate.toISOString().split('T')[0], 1
