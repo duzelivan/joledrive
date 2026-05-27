@@ -1,4 +1,4 @@
-const pool = require('./config/database');
+const pool = require('../config/database');
 
 // ============================================
 // GENERIRAJ PONAVLJAJUĆE RAČUNE
@@ -17,7 +17,10 @@ async function generateRecurringInvoices() {
        WHERE r.next_date <= CURDATE() AND (r.active IS NULL OR r.active = 1)`
     );
 
-    if (recurrences.length === 0) return;
+    if (recurrences.length === 0) {
+      connection.release();
+      return;
+    }
 
     for (const rec of recurrences) {
       // Generiraj broj računa s datumom
@@ -89,6 +92,7 @@ async function generateRecurringInvoices() {
     }
 
     await connection.commit();
+    console.log(`[${new Date().toISOString()}] Generirano ${recurrences.length} ponavljajućih računa`);
   } catch (error) {
     await connection.rollback();
     console.error('Recurring invoice generation error:', error);
