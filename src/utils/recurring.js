@@ -11,26 +11,42 @@ async function generateRecurringInvoices() {
 
     // Dohvati sve aktivne recurring zapise čiji je next_date prošao
     const [recurrences] = await connection.execute(
-      `SELECT r.*, i.invoice_number, i.description, i.amount, i.vehicle_id, i.invoice_type, i.file_path, i.file_size, i.file_type
+      `SELECT r.id, r.parent_invoice_id, r.next_date,
+              i.invoice_number, i.description, i.amount, i.vehicle_id, i.invoice_type, 
+              i.file_path, i.file_size, i.file_type, i.created_by,
+              i.recurring_type, i.recurring_interval
        FROM invoice_recurrences r
-       JOIN invoices i ON r.invoice_id = i.id
-       WHERE r.next_date <= CURDATE() AND (r.active IS NULL OR r.active = 1)`
+       JOIN invoices i ON r.parent_invoice_id = i.id
+       WHERE r.next_date <= CURDATE() AND r.active = 1`
     );
 
     if (recurrences.length === 0) {
       connection.release();
+      console.log(`[${new Date().toISOString()}] Nema ponavljajućih računa za generiranje`);
       return;
     }
 
+    let generated = 0;
+
     for (const rec of recurrences) {
-      // Generiraj broj računa s datumom
       const today = new Date();
       const dateSuffix = today.toISOString().split('T')[0].replace(/-/g, '');
       const newInvoiceNumber = `${rec.invoice_number}-${dateSuffix}`;
 
+      // Provjeri da račun s tim brojem već ne postoji (za slučaj duplog pokretanja)
+      const [existing] = await connection.execute(
+        'SELECT id FROM invoices WHERE invoice_number = ?',
+        [newInvoiceNumber]
+      );
+      if (existing.length > 0) {
+        console.log(`Račun ${newInvoiceNumber} već postoji, preskačem`);
+        continue;
+      }
+
       // Kreiraj novi račun
-      const [result] = await connection.execute(
-        `INSERT INTO invoices (invoice_number, description, amount, vehicle_id, due_date, invoice_type, file_path, file_size, file_type, created_by, recurring_type, recurring_interval)
+      await connection.execute(
+        `INSERT INTO invoices (invoice_number, description, amount, vehicle_id, due_date, 
+          invoice_type, file_path, file_size, file_type, created_by, recurring_type, recurring_interval)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           newInvoiceNumber,
@@ -43,15 +59,17 @@ async function generateRecurringInvoices() {
           rec.file_size || null,
           rec.file_type || null,
           rec.created_by,
-          rec.recurring_type,
-          rec.recurring_interval
+          'none',  // Generirani račun nema vlastiti recurring
+          1
         ]
       );
 
-      // Ažuriraj next_date
+      // Ažuriraj next_date prema intervalu
       let nextDate = new Date(rec.next_date);
       const interval = parseInt(rec.recurring_interval) || 1;
-      switch (rec.recurring_type) {
+      const recurringType = rec.recurring_type || 'monthly';
+      
+      switch (recurringType) {
         case 'daily':
           nextDate.setDate(nextDate.getDate() + interval);
           break;
@@ -66,10 +84,9 @@ async function generateRecurringInvoices() {
           break;
       }
 
-      // Ako je next_date prošao više od jednom (npr. servis je bio down), 
-      // nastavi dodavati dok ne dođemo do budućnosti
+      // Ako je server bio down, preskoči prošle datume
       while (nextDate <= today) {
-        switch (rec.recurring_type) {
+        switch (recurringType) {
           case 'daily':
             nextDate.setDate(nextDate.getDate() + interval);
             break;
@@ -89,13 +106,17 @@ async function generateRecurringInvoices() {
         'UPDATE invoice_recurrences SET next_date = ? WHERE id = ?',
         [nextDate.toISOString().split('T')[0], rec.id]
       );
+
+      generated++;
     }
 
     await connection.commit();
-    console.log(`[${new Date().toISOString()}] Generirano ${recurrences.length} ponavljajućih računa`);
+    console.log(`[${new Date().toISOString()}] Generirano ${generated} ponavljajućih računa`);
+
   } catch (error) {
     await connection.rollback();
     console.error('Recurring invoice generation error:', error);
+    throw error;
   } finally {
     connection.release();
   }
