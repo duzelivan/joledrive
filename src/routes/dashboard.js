@@ -85,6 +85,20 @@ router.get('/', authenticate, async (req, res) => {
     // Sortiraj po hitnosti (istekli prvo, pa oni što ističu uskoro)
     notifications.sort((a, b) => a.days_until - b.days_until);
 
+    // --- NEDAVNI RAČUNI (ovaj mjesec) ---
+    const [recentInvoicesMonth] = await pool.execute(
+      `SELECT i.*, v.manufacturer, v.model, v.license_plate,
+        COALESCE(SUM(p.amount), 0) as paid_amount
+       FROM invoices i
+       LEFT JOIN vehicles v ON i.vehicle_id = v.id
+       LEFT JOIN invoice_payments p ON i.id = p.invoice_id
+       WHERE i.created_at >= ? AND i.created_at <= ?
+       GROUP BY i.id
+       ORDER BY i.created_at DESC
+       LIMIT 5`,
+      [startOfMonth, endOfMonth]
+    );
+
     // --- NADOLAZEĆI SERVISI (sljedećih 30 dana) ---
     const [upcomingServices] = await pool.execute(`
       SELECT s.*, v.manufacturer, v.model, v.license_plate
@@ -95,26 +109,29 @@ router.get('/', authenticate, async (req, res) => {
       LIMIT 20
     `);
 
-    // --- ZADNJE AKTIVNOSTI ---
+    // --- ZADNJE AKTIVNOSTI (s navigateTo linkom) ---
     const [recentVehicles] = await pool.execute(`
-      SELECT 'vehicle' as type, CONCAT('Novo vozilo: ', manufacturer, ' ', model) as description, created_at
+      SELECT 'vehicle' as type, CONCAT('Novo vozilo: ', manufacturer, ' ', model) as description, created_at, id as entity_id
       FROM vehicles ORDER BY created_at DESC LIMIT 3
     `);
     const [recentServices] = await pool.execute(`
-      SELECT 'service' as type, CONCAT('Servis: ', service_type) as description, created_at
-      FROM services ORDER BY created_at DESC LIMIT 3
+      SELECT s.id, 'service' as type, CONCAT('Servis: ', s.service_type) as description, s.created_at, s.vehicle_id as entity_id, v.manufacturer, v.model
+      FROM services s LEFT JOIN vehicles v ON s.vehicle_id = v.id ORDER BY s.created_at DESC LIMIT 3
     `);
     const [recentInvoices] = await pool.execute(`
-      SELECT 'invoice' as type, CONCAT('Račun: ', invoice_number) as description, created_at
-      FROM invoices ORDER BY created_at DESC LIMIT 3
+      SELECT i.id, 'income' as type, CONCAT('Račun: ', i.invoice_number) as description, i.created_at, i.vehicle_id as entity_id, i.invoice_type
+      FROM invoices i ORDER BY i.created_at DESC LIMIT 3
     `);
     const [recentDocuments] = await pool.execute(`
-      SELECT 'document' as type, CONCAT('Dokument: ', title) as description, created_at
+      SELECT 'document' as type, CONCAT('Dokument: ', title) as description, created_at, id as entity_id
       FROM documents ORDER BY created_at DESC LIMIT 3
     `);
 
     const recentActivity = [
-      ...recentVehicles, ...recentServices, ...recentInvoices, ...recentDocuments
+      ...recentVehicles.map(v => ({ ...v, navigateTo: `/vehicles/${v.entity_id}` })),
+      ...recentServices.map(s => ({ ...s, type: 'service', navigateTo: `/vehicles/${s.entity_id}` })),
+      ...recentInvoices.map(i => ({ ...i, type: i.invoice_type === 'expense' ? 'expense' : 'income', navigateTo: i.entity_id ? `/vehicles/${i.entity_id}` : '/invoices' })),
+      ...recentDocuments.map(d => ({ ...d, navigateTo: `/documents` }))
     ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 10);
 
     // --- RESPONS ---
@@ -135,7 +152,7 @@ router.get('/', authenticate, async (req, res) => {
       monthProfit: parseFloat(monthIncome[0].total || 0) - parseFloat(monthExpenses[0].total || 0)
     };
 
-    res.json({ stats, notifications, upcomingServices, recentActivity });
+    res.json({ stats, notifications, upcomingServices, recentActivity, recentInvoices: recentInvoicesMonth });
   } catch (error) {
     console.error('Dashboard error:', error);
     res.status(500).json({ error: 'Failed to load dashboard' });
