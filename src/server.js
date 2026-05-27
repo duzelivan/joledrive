@@ -190,6 +190,30 @@ cron.schedule('0 9 * * *', sendDailyNotifications, {
 
 console.log('Cron postavljen: Svakog dana u 9:00 šalje obavijesti');
 
+// ============================================
+// CRON - Generiranje ponavljajućih računa  ← NOVO
+// ============================================
+const { generateRecurringInvoices } = require('./utils/recurring');
+
+// Pokreni svakog dana u 01:00
+cron.schedule('0 1 * * *', generateRecurringInvoices, {
+  timezone: 'Europe/Zagreb'
+});
+
+console.log('Cron postavljen: Svakog dana u 01:00 generira ponavljajuće račune');
+
+// TEST ENDPOINT - ručno pokreni generiranje recurring računa  ← NOVO
+app.get('/test-recurring', async (req, res) => {
+  try {
+    console.log('Test recurring generation triggered manually');
+    await generateRecurringInvoices();
+    res.json({ success: true, message: 'Recurring invoices generated - check logs' });
+  } catch (error) {
+    console.error('Test recurring error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Error handling
 app.use((err, req, res, next) => {
   console.error(err.stack);
