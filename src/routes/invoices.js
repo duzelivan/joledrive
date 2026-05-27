@@ -127,9 +127,19 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
     // Ako ima ponavljanje, kreiraj invoice_recurrences zapis
     if (recurring_type && recurring_type !== 'none') {
       await pool.execute(
-        `INSERT INTO invoice_recurrences (invoice_id, recurring_type, recurring_interval, next_date, created_by)
-         VALUES (?, ?, ?, ?, ?)`,
-        [result.insertId, recurring_type, recurring_interval || 1, due_date || new Date(), req.user.id]
+        `INSERT INTO invoice_recurrences 
+          (parent_invoice_id, sequence_number, total_occurrences, due_date, description, status, next_date, active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          result.insertId, 
+          1, 
+          999, 
+          due_date || new Date(), 
+          description || null, 
+          'pending', 
+          due_date || new Date(), 
+          1
+        ]
       );
     }
 
@@ -234,22 +244,23 @@ router.put('/:id', authenticate, authorizeEntity('invoices'), authorize(['invoic
     // A\u017euriraj i recurring ako je potrebno
     if (recurring_type !== undefined) {
       if (recurring_type === 'none') {
-        await pool.execute('DELETE FROM invoice_recurrences WHERE invoice_id = ?', [req.params.id]);
+        await pool.execute('DELETE FROM invoice_recurrences WHERE parent_invoice_id = ?', [req.params.id]);
       } else {
         const [existing] = await pool.execute(
-          'SELECT id FROM invoice_recurrences WHERE invoice_id = ?',
+          'SELECT id FROM invoice_recurrences WHERE parent_invoice_id = ?',
           [req.params.id]
         );
         if (existing.length > 0) {
           await pool.execute(
-            'UPDATE invoice_recurrences SET recurring_type = ?, recurring_interval = ? WHERE invoice_id = ?',
-            [recurring_type, recurring_interval || 1, req.params.id]
+            'UPDATE invoice_recurrences SET due_date = ?, next_date = ? WHERE parent_invoice_id = ? AND status = ?',
+            [due_date || new Date(), due_date || new Date(), req.params.id, 'pending']
           );
         } else {
           await pool.execute(
-            `INSERT INTO invoice_recurrences (invoice_id, recurring_type, recurring_interval, next_date)
-             VALUES (?, ?, ?, ?)`,
-            [req.params.id, recurring_type, recurring_interval || 1, due_date || new Date()]
+            `INSERT INTO invoice_recurrences 
+              (parent_invoice_id, sequence_number, total_occurrences, due_date, description, status, next_date, active)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [req.params.id, 1, 999, due_date || new Date(), description || null, 'pending', due_date || new Date(), 1]
           );
         }
       }
@@ -293,7 +304,7 @@ router.delete('/:id', authenticate, authorizeEntity('invoices'), authorize(['inv
 
     // Obriši povezane uplate i ponavljanja
     await pool.execute('DELETE FROM invoice_payments WHERE invoice_id = ?', [req.params.id]);
-    await pool.execute('DELETE FROM invoice_recurrences WHERE invoice_id = ?', [req.params.id]);
+    await pool.execute('DELETE FROM invoice_recurrences WHERE parent_invoice_id = ?', [req.params.id]);
     await pool.execute('DELETE FROM invoices WHERE id = ?', [req.params.id]);
 
     res.json({ message: 'Invoice deleted successfully' });
@@ -387,11 +398,15 @@ router.put('/recurring/:parentId/stop-all', authenticate, authorizeEntity('invoi
   }
 });
 
-// Pokreni SVE recurring zapise pod tim parentom
+// Pokreni SVE recurring zapise pod tim parentom (uključujući reset preskočenih)
 router.put('/recurring/:parentId/start-all', authenticate, authorizeEntity('invoices'), authorize(['invoices.edit']), async (req, res) => {
   try {
     await pool.execute(
       'UPDATE invoice_recurrences SET active = 1 WHERE parent_invoice_id = ?',
+      [req.params.parentId]
+    );
+    await pool.execute(
+      "UPDATE invoice_recurrences SET status = 'pending' WHERE parent_invoice_id = ? AND status = 'cancelled'",
       [req.params.parentId]
     );
     await pool.execute(
