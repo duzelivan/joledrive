@@ -152,7 +152,40 @@ router.get('/', authenticate, async (req, res) => {
       monthProfit: parseFloat(monthIncome[0].total || 0) - parseFloat(monthExpenses[0].total || 0)
     };
 
-    res.json({ stats, notifications, upcomingServices, recentActivity, recentInvoices: recentInvoicesMonth });
+    // --- TROŠKOVI PO KATEGORIJAMA (ovaj mjesec) ---
+    const [expensesByCategory] = await pool.execute(
+      `SELECT expense_type, COALESCE(SUM(amount), 0) as total
+       FROM vehicle_expenses
+       WHERE expense_date >= ? AND expense_date <= ?
+       GROUP BY expense_type`,
+      [startOfMonth.toISOString().split('T')[0], endOfMonth.toISOString().split('T')[0]]
+    );
+
+    // --- KILOMETRAŽA PO MJESECIMA (ova godina) ---
+    const [mileageByMonth] = await pool.execute(
+      `SELECT MONTH(recorded_date) as period, SUM(mileage) as total
+       FROM mileage_logs
+       WHERE YEAR(recorded_date) = ?
+       GROUP BY MONTH(recorded_date)
+       ORDER BY period ASC`,
+      [today.getFullYear()]
+    );
+
+    // --- UKUPNA KILOMETRAŽA ---
+    const [totalMileage] = await pool.execute(
+      `SELECT COALESCE(SUM(mileage), 0) as total FROM mileage_logs`
+    );
+
+    res.json({
+      stats,
+      notifications,
+      upcomingServices,
+      recentActivity,
+      recentInvoices: recentInvoicesMonth,
+      expensesByCategory,
+      mileageByMonth,
+      totalMileage: totalMileage[0].total
+    });
   } catch (error) {
     console.error('Dashboard error:', error);
     res.status(500).json({ error: 'Failed to load dashboard' });
