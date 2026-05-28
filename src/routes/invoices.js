@@ -541,9 +541,9 @@ router.post('/:id/payments', authenticate, authorizeEntity('invoices'), async (r
     }
 
     await pool.execute(
-      `INSERT INTO invoice_payments (invoice_id, amount, payment_date, payment_method, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [req.params.id, amount, payment_date || new Date(), payment_method || 'transfer', notes || null, req.user.id]
+      `INSERT INTO invoice_payments (invoice_id, amount, payment_date, payment_method, notes)
+       VALUES (?, ?, ?, ?, ?)`,
+      [req.params.id, amount, payment_date || new Date(), payment_method || 'transfer', notes || null]
     );
 
     res.json({ message: 'Payment recorded successfully' });
