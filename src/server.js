@@ -196,11 +196,11 @@ console.log('Cron postavljen: Svakog dana u 9:00 šalje obavijesti');
 const { generateRecurringInvoices } = require('./utils/recurring');
 
 // Pokreni svakog dana u 01:00
-cron.schedule('0 1 * * *', generateRecurringInvoices, {
+cron.schedule('0 8 * * *', generateRecurringInvoices, {
   timezone: 'Europe/Zagreb'
 });
 
-console.log('Cron postavljen: Svakog dana u 01:00 generira ponavljajuće račune');
+console.log('Cron postavljen: Svakog dana u 08:00 generira ponavljajuće račune');
 
 // TEST ENDPOINT - ručno pokreni generiranje recurring računa  ← NOVO
 app.get('/test-recurring', async (req, res) => {
