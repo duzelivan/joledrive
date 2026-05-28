@@ -204,18 +204,20 @@ router.get('/analytics', authenticate, async (req, res) => {
     let expenses = [];
 
     if (period === 'week' && month) {
-      // Po tjednima unutar mjeseca
+      // Po tjednima unutar mjeseca (1-5)
       const [incomeData] = await pool.execute(`
-        SELECT WEEK(p.payment_date) as period, COALESCE(SUM(p.amount), 0) as total
+        SELECT CEIL(DAY(p.payment_date) / 7) as period, COALESCE(SUM(p.amount), 0) as total
         FROM invoice_payments p
         JOIN invoices i ON p.invoice_id = i.id
         WHERE i.invoice_type = 'income' AND YEAR(p.payment_date) = ? AND MONTH(p.payment_date) = ?
-        GROUP BY WEEK(p.payment_date)
+        GROUP BY CEIL(DAY(p.payment_date) / 7)
+        ORDER BY period ASC
       `, [selectedYear, month]);
       const [expenseData] = await pool.execute(`
-        SELECT WEEK(due_date) as period, COALESCE(SUM(amount), 0) as total
-        FROM invoices WHERE invoice_type = 'expense' AND YEAR(due_date) = ? AND MONTH(due_date) = ?
-        GROUP BY WEEK(due_date)
+        SELECT CEIL(DAY(expense_date) / 7) as period, COALESCE(SUM(amount), 0) as total
+        FROM vehicle_expenses WHERE YEAR(expense_date) = ? AND MONTH(expense_date) = ?
+        GROUP BY CEIL(DAY(expense_date) / 7)
+        ORDER BY period ASC
       `, [selectedYear, month]);
       income = incomeData;
       expenses = expenseData;
