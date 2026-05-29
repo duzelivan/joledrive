@@ -275,16 +275,14 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
         );
       }
 
-      // 3. Ažuriraj total_expenses ako stupac postoji
+      // 3. Ažuriraj total_expenses
       const totalServiceCost = isAdmin ? partsCost : (partsCost + laborCostNum);
-      try {
-        await connection.execute(
-          'UPDATE vehicles SET total_expenses = COALESCE(total_expenses, 0) + ? WHERE id = ?',
-          [totalServiceCost, vehicleId]
-        );
-      } catch (e) {
-        console.log('[COMPLETE] total_expenses column may not exist, skipping vehicle update');
-      }
+      console.log('[COMPLETE] Updating vehicle', vehicleId, 'total_expenses +', totalServiceCost);
+      const [updateResult] = await connection.execute(
+        'UPDATE vehicles SET total_expenses = COALESCE(total_expenses, 0) + ? WHERE id = ?',
+        [totalServiceCost, vehicleId]
+      );
+      console.log('[COMPLETE] Rows affected:', updateResult.affectedRows, 'changed:', updateResult.changedRows);
 
       await connection.commit();
       res.json({ message: 'Service completed successfully' });
