@@ -227,6 +227,20 @@ router.delete('/:id', authenticate, authorizeEntity('users'), authorize(['users.
       }
     }
 
+    // Provjeri da li korisnik ima zaduženo vozilo
+    const [assignedVehicles] = await pool.execute(
+      'SELECT v.manufacturer, v.model, v.license_plate FROM vehicles v WHERE v.assigned_to = ? LIMIT 1',
+      [userId]
+    );
+    if (assignedVehicles.length > 0) {
+      const v = assignedVehicles[0];
+      return res.status(409).json({
+        error: 'User has assigned vehicles',
+        message: `Korisnik ima zaduženo vozilo: ${v.manufacturer} ${v.model} (${v.license_plate}). Razdužite sva vozila prije brisanja.`,
+        vehicle: `${v.manufacturer} ${v.model}`
+      });
+    }
+
     await pool.execute('DELETE FROM users WHERE id = ?', [userId]);
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
