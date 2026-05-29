@@ -296,11 +296,22 @@ router.put('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicl
 
 router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.delete']), async (req, res) => {
   try {
+    // Provjeri da li je vozilo zaduženo
+    const [vehicle] = await pool.execute('SELECT assigned_to, manufacturer, model, license_plate FROM vehicles WHERE id = ?', [req.params.id]);
+    if (vehicle.length === 0) return res.status(404).json({ error: 'Vehicle not found' });
+
+    if (vehicle[0].assigned_to) {
+      const [user] = await pool.execute('SELECT name FROM users WHERE id = ?', [vehicle[0].assigned_to]);
+      return res.status(409).json({
+        error: 'Vehicle is currently assigned',
+        message: `Vozilo je zaduženo na korisnika: ${user[0]?.name || 'Nepoznati korisnik'}. Razdužite vozilo prije brisanja.`,
+        assigned_to: vehicle[0].assigned_to
+      });
+    }
+
     // Prvo dohvati vozilo da provjerimo ima li sliku
-    const [vehicles] = await pool.execute('SELECT image_url FROM vehicles WHERE id = ?', [req.params.id]);
-    if (vehicles.length > 0 && vehicles[0].image_url) {
-      // Obriši sliku sa diska
-      const imagePath = path.join(__dirname, '../..', vehicles[0].image_url);
+    if (vehicle[0].image_url) {
+      const imagePath = path.join(__dirname, '../..', vehicle[0].image_url);
       if (fs.existsSync(imagePath)) {
         fs.unlinkSync(imagePath);
       }
@@ -309,6 +320,7 @@ router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['veh
     await pool.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
     res.json({ message: 'Vehicle deleted successfully' });
   } catch (error) {
+    console.error('Delete vehicle error:', error);
     res.status(500).json({ error: 'Failed to delete vehicle' });
   }
 });
