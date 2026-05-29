@@ -14,6 +14,9 @@ const uploadDir = path.join(__dirname, '../../uploads/vehicles');
 // Kreiraj direktorij ako ne postoji
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
+  console.log('[Upload] Created directory:', uploadDir);
+} else {
+  console.log('[Upload] Directory exists:', uploadDir);
 }
 
 const storage = multer.diskStorage({
@@ -103,6 +106,14 @@ router.get('/:id', authenticate, authorizeEntity('vehicles'), async (req, res) =
       [req.params.id]
     );
 
+    // Troškovi iz vehicle_expenses (servis, gorivo, registracija...)
+    const [expenses] = await pool.execute(
+      `SELECT * FROM vehicle_expenses
+       WHERE vehicle_id = ?
+       ORDER BY expense_date DESC`,
+      [req.params.id]
+    );
+
     const enrichedInvoices = invoices.map(inv => {
       const paid = parseFloat(inv.paid_amount || 0);
       const total = parseFloat(inv.amount);
@@ -115,6 +126,7 @@ router.get('/:id', authenticate, authorizeEntity('vehicles'), async (req, res) =
     vehicle.service_history = services;
     vehicle.invoices = enrichedInvoices;
     vehicle.documents = documents;
+    vehicle.expenses = expenses;
 
     res.json(vehicle);
   } catch (error) {
@@ -131,21 +143,66 @@ router.post('/upload-image', authenticate, upload.single('image'), (req, res) =>
     if (!req.file) {
       return res.status(400).json({ error: 'No image uploaded' });
     }
+    
+    // Provjeri da je file stvarno spremljen na disk
+    const filePath = path.join(uploadDir, req.file.filename);
+    if (!fs.existsSync(filePath)) {
+      console.error('[Upload] File not found on disk:', filePath);
+      return res.status(500).json({ error: 'File save failed' });
+    }
+    
+    console.log('[Upload] Success:', req.file.filename, 'Size:', req.file.size, 'Path:', filePath);
+    
     const imageUrl = `/uploads/vehicles/${req.file.filename}`;
     res.json({
       success: true,
       image_url: imageUrl,
-      file_name: req.file.filename
+      file_name: req.file.filename,
+      file_size: req.file.size
     });
   } catch (error) {
-    console.error('Upload image error:', error);
-    res.status(500).json({ error: 'Failed to upload image' });
+    console.error('[Upload] Error:', error);
+    res.status(500).json({ error: 'Failed to upload image', details: error.message });
   }
 });
 
 // ============================================
 // BRISANJE SLIKE VOZILA
 // ============================================
+// ============================================
+// DOHVATI SLIKU (base64) - radi na svim platformama
+// ============================================
+router.get('/image/:filename', authenticate, async (req, res) => {
+  try {
+    const filePath = path.join(uploadDir, req.params.filename);
+    
+    // Sigurnosna provjera - samo uploads/vehicles/ dozvoljen
+    const realUploadDir = fs.realpathSync(uploadDir);
+    const realFilePath = fs.realpathSync(filePath);
+    if (!realFilePath.startsWith(realUploadDir)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+    
+    const fileBuffer = fs.readFileSync(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeType = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+    
+    const base64 = fileBuffer.toString('base64');
+    res.json({
+      success: true,
+      dataUrl: `data:${mimeType};base64,${base64}`,
+      filename: req.params.filename
+    });
+  } catch (error) {
+    console.error('[Image] Error:', error);
+    res.status(500).json({ error: 'Failed to load image' });
+  }
+});
+
 router.post('/delete-image', authenticate, async (req, res) => {
   try {
     const { image_path } = req.body;
