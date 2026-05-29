@@ -38,12 +38,17 @@ router.get('/', authenticate, async (req, res) => {
        WHERE i.invoice_type = 'income' AND p.payment_date >= ? AND p.payment_date <= ?`,
       [startOfMonth.toISOString().split('T')[0], endOfMonth.toISOString().split('T')[0]]
     );
-    // Troškovi = iz vehicle_expenses (servis, gorivo, registracija...) + expense računi
-    const [monthExpenses] = await pool.execute(
+    // Troškovi = vehicle_expenses (servis, gorivo...) + expense računi
+    const [monthExpensesInvoices] = await pool.execute(
+      'SELECT COALESCE(SUM(amount), 0) as total FROM invoices WHERE invoice_type = ? AND due_date >= ? AND due_date <= ?',
+      ['expense', startOfMonth.toISOString().split('T')[0], endOfMonth.toISOString().split('T')[0]]
+    );
+    const [monthExpensesVehicle] = await pool.execute(
       `SELECT COALESCE(SUM(amount), 0) as total FROM vehicle_expenses 
        WHERE expense_date >= ? AND expense_date <= ?`,
       [startOfMonth.toISOString().split('T')[0], endOfMonth.toISOString().split('T')[0]]
     );
+    const totalMonthExpenses = parseFloat(monthExpensesInvoices[0].total) + parseFloat(monthExpensesVehicle[0].total);
 
     // --- OBAVEJŠTENJA (registracija, žuti karton, PP) ---
     const alertWindow = 30; // dana
@@ -149,8 +154,8 @@ router.get('/', authenticate, async (req, res) => {
       partialTotal: parseFloat(partialInvoices[0].total || 0),
       totalDue: parseFloat(unpaidInvoices[0].total || 0) + parseFloat(partialInvoices[0].total || 0),
       totalIncome: parseFloat(monthIncome[0].total || 0),
-      totalExpenses: parseFloat(monthExpenses[0].total || 0),
-      monthProfit: parseFloat(monthIncome[0].total || 0) - parseFloat(monthExpenses[0].total || 0)
+      totalExpenses: totalMonthExpenses,
+      monthProfit: parseFloat(monthIncome[0].total || 0) - totalMonthExpenses
     };
 
     // --- TROŠKOVI PO KATEGORIJAMA (ovaj mjesec) ---
