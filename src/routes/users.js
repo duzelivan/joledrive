@@ -33,6 +33,8 @@ async function getUserWithParsedFields(userId) {
     } else {
       user.active = Boolean(user.active);
     }
+  } else {
+    user.active = true; // default: ako nije postavljeno, smatraj aktivnim
   }
   return user;
 }
@@ -50,12 +52,22 @@ function serializeField(field) {
 // Dohvati sve korisnike (svatko tko ima pristup users entitetu)
 router.get('/', authenticate, authorizeEntity('users'), async (req, res) => {
   try {
-    const [users] = await pool.execute(
-      `SELECT id, name, email, role, type, phone, driver_license, 
+    const { active } = req.query;
+    let sql = `SELECT id, name, email, role, type, phone, driver_license, 
               address, oib, company_name, company_oib, 
               active, entities, permissions, created_at 
-       FROM users ORDER BY created_at DESC`
-    );
+       FROM users WHERE 1=1`;
+    const params = [];
+    
+    // Filter po aktivnom statusu (1=aktivan, 0=neaktivan)
+    if (active === '1' || active === '0') {
+      sql += ' AND active = ?';
+      params.push(active === '1' ? 1 : 0);
+    }
+    
+    sql += ' ORDER BY created_at DESC';
+    
+    const [users] = await pool.execute(sql, params);
 
     // Parsiraj JSON polja za svakog korisnika i konvertiraj active
     const parsedUsers = users.map(u => {
@@ -65,13 +77,15 @@ router.get('/', authenticate, authorizeEntity('users'), async (req, res) => {
       if (u.permissions && typeof u.permissions === 'string') {
         try { u.permissions = JSON.parse(u.permissions); } catch { u.permissions = {}; }
       }
-      // BIT(1) -> boolean konverzija
+      // BIT(1) -> boolean konverzija (NULL tretiraj kao aktivno/true)
       if (u.active !== undefined && u.active !== null) {
         if (Buffer.isBuffer(u.active)) {
           u.active = u.active[0] === 1;
         } else {
           u.active = Boolean(u.active);
         }
+      } else {
+        u.active = true; // default: ako nije postavljeno, smatraj aktivnim
       }
       // Ne vraćaj password hash
       delete u.password;
@@ -206,6 +220,39 @@ router.put('/:id', authenticate, authorizeEntity('users'), authorize(['users.edi
     }
     console.error('Update user error:', error);
     res.status(500).json({ error: 'Failed to update user' });
+  }
+});
+
+// Deaktiviraj korisnika
+router.put('/:id/deactivate', authenticate, authorizeEntity('users'), authorize(['users.edit']), async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    
+    // Provjeri da li korisnik ima zaduženo vozilo
+    const [vehicles] = await pool.execute('SELECT assigned_to FROM vehicles WHERE assigned_to = ? LIMIT 1', [userId]);
+    if (vehicles.length > 0) {
+      return res.status(409).json({
+        error: 'User has assigned vehicle',
+        message: 'Korisnik ima zaduženo vozilo. Razdužite vozilo prije deaktivacije.'
+      });
+    }
+    
+    await pool.execute('UPDATE users SET active = 0 WHERE id = ?', [userId]);
+    res.json({ message: 'User deactivated successfully' });
+  } catch (error) {
+    console.error('Deactivate user error:', error);
+    res.status(500).json({ error: 'Failed to deactivate user' });
+  }
+});
+
+// Aktiviraj korisnika
+router.put('/:id/activate', authenticate, authorizeEntity('users'), authorize(['users.edit']), async (req, res) => {
+  try {
+    await pool.execute('UPDATE users SET active = 1 WHERE id = ?', [req.params.id]);
+    res.json({ message: 'User activated successfully' });
+  } catch (error) {
+    console.error('Activate user error:', error);
+    res.status(500).json({ error: 'Failed to activate user' });
   }
 });
 
