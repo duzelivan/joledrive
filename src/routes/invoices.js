@@ -193,6 +193,9 @@ router.post('/', authenticate, authorizeEntity('invoices'), authorize(['invoices
     res.status(201).json({ id: result.insertId, message: 'Invoice created successfully' });
   } catch (error) {
     console.error('Create invoice error:', error);
+    if (error.code === 'ER_DUP_ENTRY' && error.sqlMessage?.includes('invoice_number')) {
+      return res.status(409).json({ error: 'Invoice number already exists. Please use a unique invoice number.' });
+    }
     res.status(500).json({ error: 'Failed to create invoice' });
   }
 });
