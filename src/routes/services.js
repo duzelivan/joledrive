@@ -250,11 +250,14 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
         }
       }
 
-      const totalServiceCost = parseFloat(labor_cost || 0) + partsTotal;
+      // Administrator: u troškove ide SAMO cijena dijelova
+      // Mehaničar: u troškove ide cijena dijelova + cijena rada
+      const isAdmin = req.user.role === 'admin';
+      const costToAdd = isAdmin ? partsTotal : (parseFloat(labor_cost || 0) + partsTotal);
 
       await connection.execute(
         'UPDATE vehicles SET total_expenses = total_expenses + ? WHERE id = ?',
-        [totalServiceCost, vehicleId]
+        [costToAdd, vehicleId]
       );
       await connection.execute(
         'UPDATE vehicles SET total_profit = total_income - total_expenses WHERE id = ?',
