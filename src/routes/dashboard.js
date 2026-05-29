@@ -30,7 +30,7 @@ router.get('/', authenticate, async (req, res) => {
       LEFT JOIN (SELECT invoice_id, SUM(amount) as paid FROM invoice_payments GROUP BY invoice_id) p ON i.id = p.invoice_id
       WHERE i.invoice_type != 'expense' AND p.paid > 0 AND p.paid < i.amount
     `);
-    // Prihod = samo uplaćeni iznosi (prema datumu uplate), ne ukupni iznos računa
+    // Prihod = samo uplaćeni iznosi (prema datumu uplate)
     const [monthIncome] = await pool.execute(
       `SELECT COALESCE(SUM(p.amount), 0) as total 
        FROM invoice_payments p
@@ -38,10 +38,11 @@ router.get('/', authenticate, async (req, res) => {
        WHERE i.invoice_type = 'income' AND p.payment_date >= ? AND p.payment_date <= ?`,
       [startOfMonth.toISOString().split('T')[0], endOfMonth.toISOString().split('T')[0]]
     );
-    // Troškovi = ukupni iznos troškovnih računa u mjesecu
+    // Troškovi = iz vehicle_expenses (servis, gorivo, registracija...) + expense računi
     const [monthExpenses] = await pool.execute(
-      'SELECT COALESCE(SUM(amount), 0) as total FROM invoices WHERE invoice_type = ? AND due_date >= ? AND due_date <= ?',
-      ['expense', startOfMonth.toISOString().split('T')[0], endOfMonth.toISOString().split('T')[0]]
+      `SELECT COALESCE(SUM(amount), 0) as total FROM vehicle_expenses 
+       WHERE expense_date >= ? AND expense_date <= ?`,
+      [startOfMonth.toISOString().split('T')[0], endOfMonth.toISOString().split('T')[0]]
     );
 
     // --- OBAVEJŠTENJA (registracija, žuti karton, PP) ---
