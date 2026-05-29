@@ -53,14 +53,24 @@ const upload = multer({
 
 router.get('/', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
-    const [vehicles] = await pool.execute(
-      `SELECT v.*, u.name as assigned_name 
+    const { status } = req.query;
+    let query = `SELECT v.*, u.name as assigned_name 
        FROM vehicles v 
-       LEFT JOIN users u ON v.assigned_to = u.id 
-       ORDER BY v.created_at DESC`
-    );
+       LEFT JOIN users u ON v.assigned_to = u.id`;
+    const params = [];
+    
+    if (status === 'archived') {
+      query += ` WHERE v.status = 'archived'`;
+    } else if (status === 'active') {
+      query += ` WHERE v.status = 'active'`;
+    }
+    
+    query += ` ORDER BY v.created_at DESC`;
+    
+    const [vehicles] = await pool.execute(query, params);
     res.json(vehicles);
   } catch (error) {
+    console.error('Fetch vehicles error:', error);
     res.status(500).json({ error: 'Failed to fetch vehicles' });
   }
 });
@@ -328,6 +338,41 @@ router.delete('/:id', authenticate, authorizeEntity('vehicles'), authorize(['veh
 // ============================================
 // SERVISNA KNJIGA - sve informacije o vozilu
 // ============================================
+// ============================================
+// ARHIVIRAJ / AKTIVIRAJ vozilo
+// ============================================
+router.put('/:id/archive', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.edit']), async (req, res) => {
+  try {
+    // Provjeri da li je vozilo zaduženo
+    const [vehicle] = await pool.execute('SELECT assigned_to, manufacturer, model, license_plate FROM vehicles WHERE id = ?', [req.params.id]);
+    if (vehicle.length === 0) return res.status(404).json({ error: 'Vehicle not found' });
+    
+    if (vehicle[0].assigned_to) {
+      const [user] = await pool.execute('SELECT name FROM users WHERE id = ?', [vehicle[0].assigned_to]);
+      return res.status(409).json({
+        error: 'Vehicle is assigned',
+        message: `Vozilo je zaduženo na korisnika: ${user[0]?.name || 'Nepoznati korisnik'}. Razdužite vozilo prije arhiviranja.`
+      });
+    }
+    
+    await pool.execute("UPDATE vehicles SET status = 'archived' WHERE id = ?", [req.params.id]);
+    res.json({ message: 'Vehicle archived successfully' });
+  } catch (error) {
+    console.error('Archive vehicle error:', error);
+    res.status(500).json({ error: 'Failed to archive vehicle' });
+  }
+});
+
+router.put('/:id/activate', authenticate, authorizeEntity('vehicles'), authorize(['vehicles.edit']), async (req, res) => {
+  try {
+    await pool.execute("UPDATE vehicles SET status = 'active' WHERE id = ?", [req.params.id]);
+    res.json({ message: 'Vehicle activated successfully' });
+  } catch (error) {
+    console.error('Activate vehicle error:', error);
+    res.status(500).json({ error: 'Failed to activate vehicle' });
+  }
+});
+
 router.get('/:id/service-book', authenticate, authorizeEntity('vehicles'), async (req, res) => {
   try {
     // 1. Podaci o vozilu
