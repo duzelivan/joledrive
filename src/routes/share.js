@@ -75,8 +75,8 @@ router.get('/view/:token', async (req, res) => {
       return res.status(400).send(renderErrorPage('Neispravan link', 'Token nije valjan ili je istekao.'));
     }
 
-    // Token ističe nakon 30 dana
-    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+    // Token ističe nakon 2 dana
+    const thirtyDaysMs = 2 * 24 * 60 * 60 * 1000;
     if (Date.now() - payload.ts > thirtyDaysMs) {
       return res.status(410).send(renderErrorPage('Link je istekao', 'Ovaj link za dijeljenje je istekao. Zatražite novi od pošiljatelja.'));
     }
