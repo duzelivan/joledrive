@@ -254,16 +254,37 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
       // Administrator: u troškove ide SAMO cijena dijelova
       // Mehaničar: u troškove ide cijena dijelova + cijena rada
       const isAdmin = req.user.role === 'admin';
-      const totalServiceCost = isAdmin ? partsTotal : (parseFloat(labor_cost || 0) + partsTotal);
+      const partsCost = partsTotal;
+      const laborCostNum = parseFloat(labor_cost || 0);
+      
+      // 1. Zapiši troškove dijelova u vehicle_expenses (uvijek)
+      if (partsCost > 0) {
+        await connection.execute(
+          `INSERT INTO vehicle_expenses (vehicle_id, expense_type, amount, description, expense_date, created_by)
+           VALUES (?, 'maintenance', ?, ?, CURDATE(), ?)`,
+          [vehicleId, partsCost, `Servis: ${work_description || 'Dijelovi'} (servis #${req.params.id})`, req.user.id]
+        );
+      }
+      
+      // 2. Zapiši troškove rada u vehicle_expenses (samo za mehaničara)
+      if (!isAdmin && laborCostNum > 0) {
+        await connection.execute(
+          `INSERT INTO vehicle_expenses (vehicle_id, expense_type, amount, description, expense_date, created_by)
+           VALUES (?, 'repair', ?, ?, CURDATE(), ?)`,
+          [vehicleId, laborCostNum, `Rad mehaničara (servis #${req.params.id})`, req.user.id]
+        );
+      }
 
-      await connection.execute(
-        'UPDATE vehicles SET total_expenses = COALESCE(total_expenses, 0) + ? WHERE id = ?',
-        [totalServiceCost, vehicleId]
-      );
-      await connection.execute(
-        'UPDATE vehicles SET total_profit = COALESCE(total_income, 0) - COALESCE(total_expenses, 0) WHERE id = ?',
-        [vehicleId]
-      );
+      // 3. Ažuriraj total_expenses ako stupac postoji
+      const totalServiceCost = isAdmin ? partsCost : (partsCost + laborCostNum);
+      try {
+        await connection.execute(
+          'UPDATE vehicles SET total_expenses = COALESCE(total_expenses, 0) + ? WHERE id = ?',
+          [totalServiceCost, vehicleId]
+        );
+      } catch (e) {
+        console.log('[COMPLETE] total_expenses column may not exist, skipping vehicle update');
+      }
 
       await connection.commit();
       res.json({ message: 'Service completed successfully' });
@@ -320,17 +341,21 @@ router.delete('/:id', authenticate, authorizeEntity('services'), authorize(['ser
     }
 
     if (service.status === 'completed') {
-      const partsTotal = partsUsed.reduce((sum, part) => sum + (part.quantity * part.unit_price), 0);
-      const totalServiceCost = parseFloat(service.labor_cost || 0) + partsTotal;
-
+      // Obriši povezane troškove iz vehicle_expenses
       await connection.execute(
-        'UPDATE vehicles SET total_expenses = total_expenses - ? WHERE id = ?',
-        [totalServiceCost, service.vehicle_id]
+        'DELETE FROM vehicle_expenses WHERE description LIKE ?',
+        [`%servis #${req.params.id}%`]
       );
-      await connection.execute(
-        'UPDATE vehicles SET total_profit = total_income - total_expenses WHERE id = ?',
-        [service.vehicle_id]
-      );
+      
+      // Ažuriraj total_expenses ako stupac postoji
+      try {
+        const partsTotal = partsUsed.reduce((sum, part) => sum + (part.quantity * part.unit_price), 0);
+        const totalServiceCost = parseFloat(service.labor_cost || 0) + partsTotal;
+        await connection.execute(
+          'UPDATE vehicles SET total_expenses = COALESCE(total_expenses, 0) - ? WHERE id = ?',
+          [totalServiceCost, service.vehicle_id]
+        );
+      } catch (e) { /* stupac možda ne postoji */ }
     }
 
     // Obriši povezana plaćanja mehaničaru
