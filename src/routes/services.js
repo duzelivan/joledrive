@@ -190,6 +190,7 @@ router.put('/:id/confirm', authenticate, authorizeEntity('services'), async (req
 router.put('/:id/complete', authenticate, authorizeEntity('services'), async (req, res) => {
   try {
     const { work_description, labor_cost, mileage, parts_used } = req.body;
+    console.log('[COMPLETE] User:', req.user.role, 'Parts:', JSON.stringify(parts_used), 'Labor:', labor_cost);
 
     const [serviceData] = await pool.execute(
       'SELECT vehicle_id FROM services WHERE id = ?',
@@ -253,14 +254,14 @@ router.put('/:id/complete', authenticate, authorizeEntity('services'), async (re
       // Administrator: u troškove ide SAMO cijena dijelova
       // Mehaničar: u troškove ide cijena dijelova + cijena rada
       const isAdmin = req.user.role === 'admin';
-      const costToAdd = isAdmin ? partsTotal : (parseFloat(labor_cost || 0) + partsTotal);
+      const totalServiceCost = isAdmin ? partsTotal : (parseFloat(labor_cost || 0) + partsTotal);
 
       await connection.execute(
-        'UPDATE vehicles SET total_expenses = total_expenses + ? WHERE id = ?',
-        [costToAdd, vehicleId]
+        'UPDATE vehicles SET total_expenses = COALESCE(total_expenses, 0) + ? WHERE id = ?',
+        [totalServiceCost, vehicleId]
       );
       await connection.execute(
-        'UPDATE vehicles SET total_profit = total_income - total_expenses WHERE id = ?',
+        'UPDATE vehicles SET total_profit = COALESCE(total_income, 0) - COALESCE(total_expenses, 0) WHERE id = ?',
         [vehicleId]
       );
 
